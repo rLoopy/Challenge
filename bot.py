@@ -729,12 +729,35 @@ async def before_reminders():
 
 if __name__ == "__main__":
     import os
+    import time
     from dotenv import load_dotenv
     load_dotenv()
-
+    
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
         print("Token manquant. Crée un fichier .env avec DISCORD_TOKEN=xxx")
         exit(1)
-
-    bot.run(TOKEN)
+    
+    # Retry avec délai exponentiel en cas d'erreur
+    max_retries = 5
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            bot.run(TOKEN)
+            break
+        except discord.errors.HTTPException as e:
+            if "429" in str(e) or "rate limit" in str(e).lower():
+                wait_time = retry_delay * (2 ** attempt)
+                print(f"Rate limited. Attente de {wait_time}s avant retry...")
+                time.sleep(wait_time)
+            else:
+                raise
+        except Exception as e:
+            print(f"Erreur: {e}")
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                print(f"Retry dans {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise
