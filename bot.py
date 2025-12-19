@@ -75,6 +75,17 @@ def get_week_info():
     iso = now.isocalendar()
     return iso[1], iso[0]
 
+def get_challenge_week_number(challenge_start_date: str) -> int:
+    """Retourne le numéro de semaine du défi (1, 2, 3...) depuis le début"""
+    start = datetime.datetime.fromisoformat(challenge_start_date)
+    now = datetime.datetime.now()
+    
+    # Calculer la différence en semaines
+    delta = now - start
+    week_number = (delta.days // 7) + 1
+    
+    return max(1, week_number)
+
 # ══════════════════════════════════════════════════════════════
 #                       DATABASE
 # ══════════════════════════════════════════════════════════════
@@ -318,23 +329,30 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment):
         description=f"**{user_name}**",
         color=Colors.SUCCESS if user_count >= user_goal else Colors.DEFAULT
     )
-
+    
     embed.add_field(
         name=user_name,
         value=progress_bar(user_count, user_goal),
         inline=True
     )
-
+    
     embed.add_field(
         name=other_name,
         value=progress_bar(other_count, other_goal),
         inline=True
     )
-
+    
     embed.set_image(url=photo.url)
-
+    
     days = days_remaining()
-    embed.set_footer(text=f"{days}j restant{'s' if days > 1 else ''}" if days > 0 else "Dernier jour")
+    challenge_week = get_challenge_week_number(challenge[12])
+    footer_text = f"Semaine {challenge_week}"
+    if days > 0:
+        footer_text += f" • {days}j restant{'s' if days > 1 else ''}"
+    else:
+        footer_text += " • Dernier jour"
+    
+    embed.set_footer(text=footer_text)
 
     await interaction.response.send_message(embed=embed)
 
@@ -349,18 +367,20 @@ async def stats(interaction: discord.Interaction):
 
     week_number, year = get_week_info()
     checkins = get_checkins_for_week(challenge[0], week_number, year)
-
+    
     user1_count = checkins.get(challenge[1], 0)
     user2_count = checkins.get(challenge[6], 0)
-
+    
     user1_total = get_total_checkins(challenge[0], challenge[1])
     user2_total = get_total_checkins(challenge[0], challenge[6])
-
+    
     streak1 = challenge[15] if len(challenge) > 15 else 0
     streak2 = challenge[16] if len(challenge) > 16 else 0
-
+    
+    challenge_week = get_challenge_week_number(challenge[12])
+    
     embed = discord.Embed(
-        title=f"Semaine {week_number}",
+        title=f"Semaine {challenge_week}",
         color=Colors.DEFAULT
     )
 
@@ -665,11 +685,13 @@ async def check_weekly_goals():
             WHERE id = ?
         ''', (new_streak1, new_streak2, new_total, week_number + 1, challenge[0]))
 
+        challenge_week = get_challenge_week_number(challenge[12])
+        
         embed = discord.Embed(
-            title=f"Semaine {week_number} validée",
+            title=f"Semaine {challenge_week} validée",
             color=Colors.SUCCESS
         )
-
+        
         embed.add_field(name=challenge[2], value=f"Streak: {new_streak1}", inline=True)
         embed.add_field(name=challenge[7], value=f"Streak: {new_streak2}", inline=True)
 
@@ -732,16 +754,16 @@ if __name__ == "__main__":
     import time
     from dotenv import load_dotenv
     load_dotenv()
-    
+
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
         print("Token manquant. Crée un fichier .env avec DISCORD_TOKEN=xxx")
         exit(1)
-    
+
     # Retry avec délai exponentiel en cas d'erreur
     max_retries = 5
     retry_delay = 5
-    
+
     for attempt in range(max_retries):
         try:
             bot.run(TOKEN)
