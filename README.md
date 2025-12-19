@@ -29,7 +29,10 @@ pip install -r requirements.txt
 Créer `.env` :
 ```
 DISCORD_TOKEN=ton_token
+DATABASE_URL=postgresql://user:password@host:port/database
 ```
+
+> **Note :** Pour Supabase, utiliser l'URL du **Pooler** (Transaction mode, port 6543)
 
 ### 3. Lancer
 

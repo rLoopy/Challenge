@@ -32,11 +32,22 @@ railway init
 railway up
 ```
 
-### 4. Ajouter le token Discord
+### 4. Configurer les variables d'environnement
 
 Dans Railway Dashboard :
 1. Ton projet → Variables
-2. Ajouter : `DISCORD_TOKEN` = `ton_token_discord`
+2. Ajouter les variables suivantes :
+
+| Variable | Valeur |
+|----------|--------|
+| `DISCORD_TOKEN` | Ton token Discord |
+| `DATABASE_URL` | URL PostgreSQL Supabase |
+
+**Pour Supabase :**
+1. Supabase Dashboard → Project Settings → Database
+2. Copie l'URL **Pooler** (Transaction mode, port 6543)
+3. Remplace `[YOUR-PASSWORD]` par ton mot de passe
+
 3. Le bot redémarre automatiquement
 
 ### 5. Vérifier les logs
@@ -54,10 +65,16 @@ Dans Railway :
 - `railway.json` — Config Railway
 - `.railwayignore` — Fichiers à ignorer
 
-## Base de données
+## Base de données (Supabase)
 
-Railway crée un volume persistant automatiquement.
-La base SQLite (`challenge.db`) sera conservée entre les redémarrages.
+Le bot utilise PostgreSQL via Supabase pour la persistance des données.
+
+**Avantages :**
+- Données persistantes entre les redéploiements
+- Pas de perte de données
+- Gratuit (plan Free Supabase)
+
+Les tables sont créées automatiquement au premier démarrage.
 
 ## Monitoring
 
@@ -79,8 +96,8 @@ railway logs
 - Vérifie les logs pour identifier le problème
 
 **Base de données vide après redémarrage :**
-- Vérifie que le volume est bien monté
-- Railway devrait le gérer automatiquement
+- Vérifie que `DATABASE_URL` est bien configurée
+- Les données sont sur Supabase, pas en local
 
 ## Coût
 

@@ -5,11 +5,12 @@ Challenge Bot - Track your commitments. No excuses.
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import sqlite3
 import datetime
 import random
 import os
 from typing import Optional
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # ══════════════════════════════════════════════════════════════
 #                       CONFIG
@@ -32,12 +33,12 @@ def progress_bar(current: int, goal: int, length: int = 10) -> str:
     """Barre de progression stylée ■■■■□□□□□□"""
     filled = min(current, goal)
     empty = max(0, goal - filled)
-    
+
     # Ajuster pour la longueur
     ratio = filled / goal if goal > 0 else 0
     filled_blocks = int(ratio * length)
     empty_blocks = length - filled_blocks
-    
+
     return "■" * filled_blocks + "□" * empty_blocks
 
 def format_stat_line(label: str, value: str, width: int = 12) -> str:
@@ -65,32 +66,36 @@ def get_challenge_week_number(challenge_start_date: str) -> int:
     return max(1, week_number)
 
 # ══════════════════════════════════════════════════════════════
-#                       DATABASE
+#                       DATABASE (PostgreSQL / Supabase)
 # ══════════════════════════════════════════════════════════════
 
-DB_PATH = os.getenv('DB_PATH', 'challenge.db')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 def get_db():
-    return sqlite3.connect(DB_PATH)
+    """Connexion à PostgreSQL"""
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL non configurée")
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
+    """Initialise les tables dans PostgreSQL"""
     conn = get_db()
     c = conn.cursor()
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS challenge (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user1_id INTEGER NOT NULL,
+            id SERIAL PRIMARY KEY,
+            user1_id BIGINT NOT NULL,
             user1_name TEXT NOT NULL,
             user1_activity TEXT NOT NULL,
             user1_goal INTEGER NOT NULL,
             user1_gage TEXT NOT NULL,
-            user2_id INTEGER NOT NULL,
+            user2_id BIGINT NOT NULL,
             user2_name TEXT NOT NULL,
             user2_activity TEXT NOT NULL,
             user2_goal INTEGER NOT NULL,
             user2_gage TEXT NOT NULL,
-            channel_id INTEGER NOT NULL,
+            channel_id BIGINT NOT NULL,
             start_date TEXT NOT NULL,
             is_active INTEGER DEFAULT 1,
             week_number INTEGER NOT NULL,
@@ -102,9 +107,9 @@ def init_db():
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS checkins (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             challenge_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
+            user_id BIGINT NOT NULL,
             timestamp TEXT NOT NULL,
             week_number INTEGER NOT NULL,
             year INTEGER NOT NULL,
@@ -115,11 +120,11 @@ def init_db():
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             challenge_id INTEGER NOT NULL,
-            winner_id INTEGER,
+            winner_id BIGINT,
             winner_name TEXT,
-            loser_id INTEGER,
+            loser_id BIGINT,
             loser_name TEXT,
             loser_gage TEXT,
             end_date TEXT NOT NULL,
@@ -130,33 +135,47 @@ def init_db():
 
     conn.commit()
     conn.close()
+    print("✅ Base de données PostgreSQL initialisée")
 
 def get_active_challenge():
+    """Récupère le défi actif"""
     conn = get_db()
     c = conn.cursor()
     c.execute('SELECT * FROM challenge WHERE is_active = 1 ORDER BY id DESC LIMIT 1')
-    challenge = c.fetchone()
+    row = c.fetchone()
     conn.close()
-    return challenge
+    
+    if row:
+        # Convertir en tuple pour compatibilité
+        return (
+            row['id'], row['user1_id'], row['user1_name'], row['user1_activity'],
+            row['user1_goal'], row['user1_gage'], row['user2_id'], row['user2_name'],
+            row['user2_activity'], row['user2_goal'], row['user2_gage'], row['channel_id'],
+            row['start_date'], row['is_active'], row['week_number'],
+            row['streak_user1'], row['streak_user2'], row['total_weeks']
+        )
+    return None
 
 def get_checkins_for_week(challenge_id, week_number, year):
+    """Récupère les check-ins de la semaine"""
     conn = get_db()
     c = conn.cursor()
     c.execute('''
         SELECT user_id, COUNT(*) as count
         FROM checkins
-        WHERE challenge_id = ? AND week_number = ? AND year = ?
+        WHERE challenge_id = %s AND week_number = %s AND year = %s
         GROUP BY user_id
     ''', (challenge_id, week_number, year))
     checkins = c.fetchall()
     conn.close()
-    return {user_id: count for user_id, count in checkins}
+    return {row['user_id']: row['count'] for row in checkins}
 
 def get_total_checkins(challenge_id, user_id):
+    """Récupère le total de check-ins"""
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM checkins WHERE challenge_id = ? AND user_id = ?', (challenge_id, user_id))
-    result = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) as count FROM checkins WHERE challenge_id = %s AND user_id = %s', (challenge_id, user_id))
+    result = c.fetchone()['count']
     conn.close()
     return result
 
@@ -227,7 +246,7 @@ async def setup(
         (user1_id, user1_name, user1_activity, user1_goal, user1_gage,
          user2_id, user2_name, user2_activity, user2_goal, user2_gage,
          channel_id, start_date, week_number, streak_user1, streak_user2, total_weeks)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0)
     ''', (user1.id, user1.display_name, activity1, goal1, gage1,
           user2.id, user2.display_name, activity2, goal2, gage2,
           interaction.channel_id, start_date, week_number))
@@ -237,7 +256,7 @@ async def setup(
 
     # Embed stylé
     embed = discord.Embed(color=EMBED_COLOR)
-    
+
     embed.description = f"""▸ **NOUVEAU DÉFI**
 
 {user1.display_name} **vs** {user2.display_name}
@@ -265,7 +284,7 @@ Lundi → Dimanche • Photo obligatoire
 Objectif manqué = **GAME OVER**"""
 
     embed.set_footer(text=f"◆ Challenge Bot • {datetime.datetime.now().strftime('%d/%m/%Y')}")
-    
+
     await interaction.response.send_message(embed=embed)
 
 
@@ -295,7 +314,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment):
 
     c.execute('''
         INSERT INTO checkins (challenge_id, user_id, timestamp, week_number, year, photo_url)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s)
     ''', (challenge[0], user_id, timestamp, week_number, year, photo.url))
 
     conn.commit()
@@ -312,7 +331,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment):
 
     user_count = checkins.get(user_id, 0)
     other_count = checkins.get(other_id, 0)
-    
+
     # Statut
     if user_count >= user_goal:
         status = "✓ VALIDÉ"
@@ -320,13 +339,13 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment):
     else:
         status = "En cours"
         status_emoji = "▸"
-    
+
     challenge_week = get_challenge_week_number(challenge[12])
     days = get_days_remaining()
 
     # Embed stylé
     embed = discord.Embed(color=EMBED_COLOR)
-    
+
     embed.description = f"""{status_emoji} **{status.upper()}**
 
 **{user_name.upper()}**
@@ -347,10 +366,10 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment):
 {format_stat_line("RESTANT", f"{days}j")}
 {format_stat_line("DEADLINE", "Dimanche 23h")}
 ```"""
-    
+
     embed.set_image(url=photo.url)
     embed.set_footer(text=f"◆ Challenge Bot • {datetime.datetime.now().strftime('%H:%M')}")
-    
+
     await interaction.response.send_message(embed=embed)
 
 
@@ -364,20 +383,20 @@ async def stats(interaction: discord.Interaction):
 
     week_number, year = get_week_info()
     checkins = get_checkins_for_week(challenge[0], week_number, year)
-    
+
     user1_count = checkins.get(challenge[1], 0)
     user2_count = checkins.get(challenge[6], 0)
-    
+
     user1_total = get_total_checkins(challenge[0], challenge[1])
     user2_total = get_total_checkins(challenge[0], challenge[6])
-    
+
     challenge_week = get_challenge_week_number(challenge[12])
     days = get_days_remaining()
-    
+
     # Déterminer le leader
     user1_pct = user1_count / challenge[4] if challenge[4] > 0 else 0
     user2_pct = user2_count / challenge[6] if challenge[9] > 0 else 0
-    
+
     if user1_count >= challenge[4] and user2_count >= challenge[9]:
         status_text = "✓ Les deux ont validé"
     elif user1_pct > user2_pct:
@@ -386,7 +405,7 @@ async def stats(interaction: discord.Interaction):
         status_text = f"▸ {challenge[7]} mène"
     else:
         status_text = "▸ Égalité"
-    
+
     # Calcul du temps restant
     if days == 0:
         time_status = "⚠ DERNIER JOUR"
@@ -396,7 +415,7 @@ async def stats(interaction: discord.Interaction):
         time_status = f"{days} jours restants"
 
     embed = discord.Embed(color=EMBED_COLOR)
-    
+
     embed.description = f"""▸ **SEMAINE {challenge_week}**
 
 {status_text}
@@ -430,7 +449,7 @@ Vérification: Dimanche 23h30
 ```"""
 
     embed.set_footer(text=f"◆ Challenge Bot • Semaine {challenge_week}")
-    
+
     await interaction.response.send_message(embed=embed)
 
 
@@ -454,7 +473,7 @@ async def cancel(interaction: discord.Interaction):
         async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
             conn = get_db()
             c = conn.cursor()
-            c.execute('UPDATE challenge SET is_active = 0 WHERE id = ?', (challenge[0],))
+            c.execute('UPDATE challenge SET is_active = 0 WHERE id = %s', (challenge[0],))
             conn.commit()
             conn.close()
 
@@ -465,7 +484,7 @@ Le défi a été annulé.
 Aucun gagnant, aucun perdant.
 
 Utilisez `/setup` pour recommencer."""
-            
+
             await interaction.response.edit_message(embed=embed, view=None)
             self.stop()
 
@@ -480,14 +499,14 @@ Utilisez `/setup` pour recommencer."""
 Voulez-vous vraiment annuler le défi ?
 
 Cette action est irréversible."""
-    
+
     await interaction.response.send_message(embed=embed, view=ConfirmView(), ephemeral=True)
 
 
 @bot.tree.command(name="help", description="Aide")
 async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(color=EMBED_COLOR)
-    
+
     embed.description = """▸ **CHALLENGE BOT**
 
 Un défi. Deux personnes. Pas d'excuses.
@@ -519,7 +538,7 @@ Un défi. Deux personnes. Pas d'excuses.
 4. Dimanche 23h30 = vérification"""
 
     embed.set_footer(text="◆ Challenge Bot")
-    
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -543,7 +562,7 @@ async def reset_cmd(interaction: discord.Interaction):
             embed.description = """▸ **RESET EFFECTUÉ**
 
 Toutes les données ont été supprimées."""
-            
+
             await interaction.response.edit_message(embed=embed, view=None)
             self.stop()
 
@@ -568,7 +587,7 @@ Cette action va supprimer **TOUTES** les données :
 @bot.tree.command(name="test", description="Vérifier l'état du bot")
 async def test_cmd(interaction: discord.Interaction):
     challenge = get_active_challenge()
-    
+
     conn = get_db()
     c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM checkins')
@@ -578,7 +597,7 @@ async def test_cmd(interaction: discord.Interaction):
     conn.close()
 
     embed = discord.Embed(color=EMBED_COLOR)
-    
+
     embed.description = f"""▸ **STATUS**
 
 Bot opérationnel
@@ -600,7 +619,7 @@ Bot opérationnel
 ```"""
 
     embed.set_footer(text="◆ Challenge Bot")
-    
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ══════════════════════════════════════════════════════════════
@@ -647,10 +666,10 @@ async def check_weekly_goals():
     challenge_week = get_challenge_week_number(challenge[12])
 
     if user1_failed or user2_failed:
-        c.execute('UPDATE challenge SET is_active = 0 WHERE id = ?', (challenge[0],))
+        c.execute('UPDATE challenge SET is_active = 0 WHERE id = %s', (challenge[0],))
 
         embed = discord.Embed(color=EMBED_COLOR)
-        
+
         if user1_failed and user2_failed:
             embed.description = f"""▸ **GAME OVER**
 
@@ -674,7 +693,7 @@ Les deux ont échoué.
 
             c.execute('''
                 INSERT INTO history (challenge_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
-                VALUES (?, NULL, NULL, NULL, 'Les deux', ?, ?, 'Double échec', ?)
+                VALUES (%s, NULL, NULL, NULL, 'Les deux', %s, %s, 'Double échec', %s)
             ''', (challenge[0], f"{challenge[5]} / {challenge[10]}", now.isoformat(), total_weeks))
 
         elif user1_failed:
@@ -703,7 +722,7 @@ Les deux ont échoué.
 
             c.execute('''
                 INSERT INTO history (challenge_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (challenge[0], challenge[6], challenge[7], challenge[1], challenge[2], challenge[5], now.isoformat(), 'Objectif non atteint', total_weeks))
 
         else:
@@ -732,7 +751,7 @@ Les deux ont échoué.
 
             c.execute('''
                 INSERT INTO history (challenge_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (challenge[0], challenge[1], challenge[2], challenge[6], challenge[7], challenge[10], now.isoformat(), 'Objectif non atteint', total_weeks))
 
         embed.set_footer(text=f"◆ Challenge Bot • Semaine {challenge_week}")
@@ -746,8 +765,8 @@ Les deux ont échoué.
 
         c.execute('''
             UPDATE challenge
-            SET streak_user1 = ?, streak_user2 = ?, total_weeks = ?, week_number = ?
-            WHERE id = ?
+            SET streak_user1 = %s, streak_user2 = %s, total_weeks = %s, week_number = %s
+            WHERE id = %s
         ''', (new_streak1, new_streak2, new_total, week_number + 1, challenge[0]))
 
         embed = discord.Embed(color=EMBED_COLOR)
@@ -805,20 +824,20 @@ async def send_reminders():
 
     if user1_remaining > 0 or user2_remaining > 0:
         embed = discord.Embed(color=EMBED_COLOR)
-        
+
         reminder_text = "▸ **RAPPEL**\n\n"
-        
+
         if user1_remaining > 0:
             reminder_text += f"<@{challenge[1]}> — **{user1_remaining}** session(s) restante(s)\n"
-        
+
         if user2_remaining > 0:
             reminder_text += f"<@{challenge[6]}> — **{user2_remaining}** session(s) restante(s)\n"
-        
+
         reminder_text += f"\n**{days}** jour(s) restant(s)."
-        
+
         embed.description = reminder_text
         embed.set_footer(text="◆ Challenge Bot")
-        
+
         await channel.send(embed=embed)
 
 
