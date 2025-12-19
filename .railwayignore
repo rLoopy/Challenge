@@ -1,0 +1,12 @@
+*.db
+*.sqlite
+*.sqlite3
+.env
+__pycache__/
+*.pyc
+.git/
+.vscode/
+.idea/
+*.md
+start.bat
+
