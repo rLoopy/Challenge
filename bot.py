@@ -395,7 +395,7 @@ async def stats(interaction: discord.Interaction):
 
     # Déterminer le leader
     user1_pct = user1_count / challenge[4] if challenge[4] > 0 else 0
-    user2_pct = user2_count / challenge[6] if challenge[9] > 0 else 0
+    user2_pct = user2_count / challenge[9] if challenge[9] > 0 else 0
 
     if user1_count >= challenge[4] and user2_count >= challenge[9]:
         status_text = "✓ Les deux ont validé"
@@ -609,7 +609,7 @@ Bot opérationnel
 {format_stat_line("DÉFI ACTIF", "Oui" if challenge else "Non")}
 {format_stat_line("TOTAL DÉFIS", str(total_challenges))}
 {format_stat_line("CHECK-INS", str(total_checkins))}
-{format_stat_line("DB TYPE", "SQLite")}
+{format_stat_line("DB TYPE", "PostgreSQL")}
 ```
 
 ◆ **BOT**
