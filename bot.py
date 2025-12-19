@@ -448,6 +448,104 @@ async def help_cmd(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@bot.tree.command(name="reset", description="⚠️ Réinitialiser toutes les données (TEST)")
+async def reset_cmd(interaction: discord.Interaction):
+    """Réinitialise complètement la base de données - pour les tests uniquement"""
+
+    class ConfirmReset(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=30)
+
+        @discord.ui.button(label="Oui, tout effacer", style=discord.ButtonStyle.danger)
+        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+            import os
+
+            conn = sqlite3.connect('challenge.db')
+            c = conn.cursor()
+
+            # Supprimer toutes les données
+            c.execute('DELETE FROM checkins')
+            c.execute('DELETE FROM history')
+            c.execute('DELETE FROM challenge')
+
+            conn.commit()
+            conn.close()
+
+            embed = discord.Embed(
+                title="Base de données réinitialisée",
+                description="Toutes les données ont été supprimées.",
+                color=Colors.SUCCESS
+            )
+
+            await interaction.response.edit_message(embed=embed, view=None)
+            self.stop()
+
+        @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
+        async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await interaction.response.edit_message(content="Annulé.", embed=None, view=None)
+            self.stop()
+
+    embed = discord.Embed(
+        title="⚠️ Réinitialisation complète",
+        description="**ATTENTION:** Cette action va supprimer **TOUTES** les données :\n\n• Tous les défis\n• Tous les check-ins\n• Tout l'historique\n\n**Cette action est irréversible.**",
+        color=Colors.WARNING
+    )
+
+    await interaction.response.send_message(embed=embed, view=ConfirmReset(), ephemeral=True)
+
+
+@bot.tree.command(name="test", description="Vérifier l'état du bot")
+async def test_cmd(interaction: discord.Interaction):
+    """Commande de test pour vérifier que le bot fonctionne"""
+
+    challenge = get_active_challenge()
+
+    embed = discord.Embed(
+        title="Test du bot",
+        color=Colors.INFO
+    )
+
+    embed.add_field(
+        name="Statut",
+        value="✓ Bot opérationnel" if bot.is_ready() else "✗ Bot non prêt",
+        inline=False
+    )
+
+    embed.add_field(
+        name="Défi actif",
+        value="Oui" if challenge else "Non",
+        inline=True
+    )
+
+    if challenge:
+        week_number, year = get_week_info()
+        checkins = get_checkins_for_week(challenge[0], week_number, year)
+        embed.add_field(
+            name="Check-ins cette semaine",
+            value=f"User1: {checkins.get(challenge[1], 0)}\nUser2: {checkins.get(challenge[6], 0)}",
+            inline=True
+        )
+
+    # Infos DB
+    conn = sqlite3.connect('challenge.db')
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM checkins')
+    total_checkins = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM challenge WHERE is_active = 1')
+    active_challenges = c.fetchone()[0]
+    conn.close()
+
+    embed.add_field(
+        name="Base de données",
+        value=f"Check-ins totaux: {total_checkins}\nDéfis actifs: {active_challenges}",
+        inline=False
+    )
+
+    embed.set_footer(text="Utilisez /reset pour réinitialiser les données de test")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # ══════════════════════════════════════════════════════════════
 #                       SCHEDULED TASKS
 # ══════════════════════════════════════════════════════════════
