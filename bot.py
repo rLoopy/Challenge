@@ -144,7 +144,7 @@ def get_active_challenge():
     c.execute('SELECT * FROM challenge WHERE is_active = 1 ORDER BY id DESC LIMIT 1')
     row = c.fetchone()
     conn.close()
-    
+
     if row:
         # Convertir en tuple pour compatibilité
         return (
@@ -590,10 +590,10 @@ async def test_cmd(interaction: discord.Interaction):
 
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM checkins')
-    total_checkins = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM challenge')
-    total_challenges = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) as count FROM checkins')
+    total_checkins = c.fetchone()['count']
+    c.execute('SELECT COUNT(*) as count FROM challenge')
+    total_challenges = c.fetchone()['count']
     conn.close()
 
     embed = discord.Embed(color=EMBED_COLOR)
