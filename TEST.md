@@ -91,3 +91,4 @@ Après `/reset`, crée un vrai défi avec les bons objectifs :
 ```
 Devrait afficher : "Défi actif: Non" et "Check-ins totaux: 0"
 
+

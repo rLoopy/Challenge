@@ -101,8 +101,23 @@ def init_db():
             week_number INTEGER NOT NULL,
             streak_user1 INTEGER DEFAULT 0,
             streak_user2 INTEGER DEFAULT 0,
-            total_weeks INTEGER DEFAULT 0
+            total_weeks INTEGER DEFAULT 0,
+            freeze_user1 INTEGER DEFAULT 0,
+            freeze_user2 INTEGER DEFAULT 0
         )
+    ''')
+    
+    # Ajouter les colonnes freeze si elles n'existent pas (migration)
+    c.execute('''
+        DO $$ 
+        BEGIN 
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='freeze_user1') THEN
+                ALTER TABLE challenge ADD COLUMN freeze_user1 INTEGER DEFAULT 0;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='freeze_user2') THEN
+                ALTER TABLE challenge ADD COLUMN freeze_user2 INTEGER DEFAULT 0;
+            END IF;
+        END $$;
     ''')
 
     c.execute('''
@@ -147,12 +162,18 @@ def get_active_challenge():
 
     if row:
         # Convertir en tuple pour compatibilité
+        # Index: 0=id, 1=user1_id, 2=user1_name, 3=user1_activity, 4=user1_goal, 5=user1_gage
+        #        6=user2_id, 7=user2_name, 8=user2_activity, 9=user2_goal, 10=user2_gage
+        #        11=channel_id, 12=start_date, 13=is_active, 14=week_number
+        #        15=streak_user1, 16=streak_user2, 17=total_weeks
+        #        18=freeze_user1, 19=freeze_user2
         return (
             row['id'], row['user1_id'], row['user1_name'], row['user1_activity'],
             row['user1_goal'], row['user1_gage'], row['user2_id'], row['user2_name'],
             row['user2_activity'], row['user2_goal'], row['user2_gage'], row['channel_id'],
             row['start_date'], row['is_active'], row['week_number'],
-            row['streak_user1'], row['streak_user2'], row['total_weeks']
+            row['streak_user1'], row['streak_user2'], row['total_weeks'],
+            row.get('freeze_user1', 0) or 0, row.get('freeze_user2', 0) or 0
         )
     return None
 
@@ -393,6 +414,10 @@ async def stats(interaction: discord.Interaction):
     challenge_week = get_challenge_week_number(challenge[12])
     days = get_days_remaining()
 
+    # Vérifier le freeze
+    user1_frozen = challenge[18] if len(challenge) > 18 else 0
+    user2_frozen = challenge[19] if len(challenge) > 19 else 0
+
     # Déterminer le leader
     user1_pct = user1_count / challenge[4] if challenge[4] > 0 else 0
     user2_pct = user2_count / challenge[9] if challenge[9] > 0 else 0
@@ -405,6 +430,10 @@ async def stats(interaction: discord.Interaction):
         status_text = f"▸ {challenge[7]} mène"
     else:
         status_text = "▸ Égalité"
+    
+    # Indicateurs freeze
+    user1_freeze_tag = " ❄" if user1_frozen else ""
+    user2_freeze_tag = " ❄" if user2_frozen else ""
 
     # Calcul du temps restant
     if days == 0:
@@ -422,19 +451,19 @@ async def stats(interaction: discord.Interaction):
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-◆ **{challenge[2].upper()}** — {challenge[3]}
+◆ **{challenge[2].upper()}**{user1_freeze_tag} — {challenge[3]}
 ```
 CETTE SEMAINE ——— {user1_count}/{challenge[4]}
-{progress_bar(user1_count, challenge[4])} {"✓" if user1_count >= challenge[4] else ""}
+{progress_bar(user1_count, challenge[4])} {"✓" if user1_count >= challenge[4] else ""}{"FREEZE" if user1_frozen else ""}
 
 TOTAL ——————————— {user1_total}
 GAGE ———————————— {challenge[5][:15]}
 ```
 
-◆ **{challenge[7].upper()}** — {challenge[8]}
+◆ **{challenge[7].upper()}**{user2_freeze_tag} — {challenge[8]}
 ```
 CETTE SEMAINE ——— {user2_count}/{challenge[9]}
-{progress_bar(user2_count, challenge[9])} {"✓" if user2_count >= challenge[9] else ""}
+{progress_bar(user2_count, challenge[9])} {"✓" if user2_count >= challenge[9] else ""}{"FREEZE" if user2_frozen else ""}
 
 TOTAL ——————————— {user2_total}
 GAGE ———————————— {challenge[10][:15]}
@@ -518,6 +547,8 @@ Un défi. Deux personnes. Pas d'excuses.
 /setup   — Créer un défi
 /checkin — Enregistrer une session
 /stats   — Voir la progression
+/freeze  — Pause (maladie, etc.)
+/unfreeze— Reprendre le défi
 /cancel  — Annuler le défi
 ```
 
@@ -622,6 +653,115 @@ Bot opérationnel
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@bot.tree.command(name="freeze", description="Mettre en pause (maladie, etc.)")
+@app_commands.describe(raison="Raison du freeze (optionnel)")
+async def freeze_cmd(interaction: discord.Interaction, raison: str = "Non spécifiée"):
+    challenge = get_active_challenge()
+
+    if not challenge:
+        await interaction.response.send_message("Pas de défi actif.", ephemeral=True)
+        return
+
+    user_id = interaction.user.id
+    if user_id not in [challenge[1], challenge[6]]:
+        await interaction.response.send_message("Tu ne participes pas.", ephemeral=True)
+        return
+
+    # Vérifier si déjà en freeze
+    if user_id == challenge[1]:
+        is_frozen = challenge[18]
+        freeze_col = "freeze_user1"
+        user_name = challenge[2]
+    else:
+        is_frozen = challenge[19]
+        freeze_col = "freeze_user2"
+        user_name = challenge[7]
+
+    if is_frozen:
+        await interaction.response.send_message("Tu es déjà en freeze.", ephemeral=True)
+        return
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(f'UPDATE challenge SET {freeze_col} = 1 WHERE id = %s', (challenge[0],))
+    conn.commit()
+    conn.close()
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **FREEZE ACTIVÉ**
+
+**{user_name}** est en pause.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **RAISON**
+```
+{raison[:50]}
+```
+
+◆ **EFFET**
+```
+Objectif non requis cette semaine
+Pas de pénalité si non atteint
+```
+
+▼ Utilise `/unfreeze` pour reprendre."""
+
+    embed.set_footer(text="◆ Challenge Bot")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="unfreeze", description="Reprendre le défi")
+async def unfreeze_cmd(interaction: discord.Interaction):
+    challenge = get_active_challenge()
+
+    if not challenge:
+        await interaction.response.send_message("Pas de défi actif.", ephemeral=True)
+        return
+
+    user_id = interaction.user.id
+    if user_id not in [challenge[1], challenge[6]]:
+        await interaction.response.send_message("Tu ne participes pas.", ephemeral=True)
+        return
+
+    # Vérifier si en freeze
+    if user_id == challenge[1]:
+        is_frozen = challenge[18]
+        freeze_col = "freeze_user1"
+        user_name = challenge[2]
+    else:
+        is_frozen = challenge[19]
+        freeze_col = "freeze_user2"
+        user_name = challenge[7]
+
+    if not is_frozen:
+        await interaction.response.send_message("Tu n'es pas en freeze.", ephemeral=True)
+        return
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(f'UPDATE challenge SET {freeze_col} = 0 WHERE id = %s', (challenge[0],))
+    conn.commit()
+    conn.close()
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **FREEZE DÉSACTIVÉ**
+
+**{user_name}** reprend le défi.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+L'objectif hebdomadaire est de nouveau requis.
+
+Bonne reprise !"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+
+    await interaction.response.send_message(embed=embed)
+
+
 # ══════════════════════════════════════════════════════════════
 #                       SCHEDULED TASKS
 # ══════════════════════════════════════════════════════════════
@@ -652,8 +792,12 @@ async def check_weekly_goals():
     user1_goal = challenge[4]
     user2_goal = challenge[9]
 
-    user1_failed = user1_count < user1_goal
-    user2_failed = user2_count < user2_goal
+    # Vérifier le freeze - si en freeze, pas de pénalité
+    user1_frozen = challenge[18] if len(challenge) > 18 else 0
+    user2_frozen = challenge[19] if len(challenge) > 19 else 0
+
+    user1_failed = user1_count < user1_goal and not user1_frozen
+    user2_failed = user2_count < user2_goal and not user2_frozen
 
     channel = bot.get_channel(challenge[11])
     if not channel:
@@ -816,11 +960,15 @@ async def send_reminders():
     if not channel:
         return
 
+    # Vérifier le freeze
+    user1_frozen = challenge[18] if len(challenge) > 18 else 0
+    user2_frozen = challenge[19] if len(challenge) > 19 else 0
+
     user1_count = checkins.get(challenge[1], 0)
-    user1_remaining = challenge[4] - user1_count
+    user1_remaining = challenge[4] - user1_count if not user1_frozen else 0
 
     user2_count = checkins.get(challenge[6], 0)
-    user2_remaining = challenge[9] - user2_count
+    user2_remaining = challenge[9] - user2_count if not user2_frozen else 0
 
     if user1_remaining > 0 or user2_remaining > 0:
         embed = discord.Embed(color=EMBED_COLOR)
