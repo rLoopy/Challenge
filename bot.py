@@ -106,11 +106,11 @@ def init_db():
             freeze_user2 INTEGER DEFAULT 0
         )
     ''')
-    
+
     # Ajouter les colonnes freeze si elles n'existent pas (migration)
     c.execute('''
-        DO $$ 
-        BEGIN 
+        DO $$
+        BEGIN
             IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='freeze_user1') THEN
                 ALTER TABLE challenge ADD COLUMN freeze_user1 INTEGER DEFAULT 0;
             END IF;
@@ -414,6 +414,16 @@ async def stats(interaction: discord.Interaction):
     challenge_week = get_challenge_week_number(challenge[12])
     days = get_days_remaining()
 
+    # Vérifier si c'est une semaine "d'échauffement" (créé en cours de semaine, pas un lundi)
+    warmup_week = False
+    start_week = challenge[14] if len(challenge) > 14 else 0
+    if start_week == week_number:
+        start_date_str = challenge[12] if len(challenge) > 12 else None
+        if start_date_str:
+            start_date = datetime.datetime.fromisoformat(start_date_str)
+            if start_date.weekday() != 0:  # Pas créé un lundi
+                warmup_week = True
+
     # Vérifier le freeze
     user1_frozen = challenge[18] if len(challenge) > 18 else 0
     user2_frozen = challenge[19] if len(challenge) > 19 else 0
@@ -422,7 +432,9 @@ async def stats(interaction: discord.Interaction):
     user1_pct = user1_count / challenge[4] if challenge[4] > 0 else 0
     user2_pct = user2_count / challenge[9] if challenge[9] > 0 else 0
 
-    if user1_count >= challenge[4] and user2_count >= challenge[9]:
+    if warmup_week:
+        status_text = "⚡ Semaine d'échauffement (non comptée)"
+    elif user1_count >= challenge[4] and user2_count >= challenge[9]:
         status_text = "✓ Les deux ont validé"
     elif user1_pct > user2_pct:
         status_text = f"▸ {challenge[2]} mène"
@@ -430,7 +442,7 @@ async def stats(interaction: discord.Interaction):
         status_text = f"▸ {challenge[7]} mène"
     else:
         status_text = "▸ Égalité"
-    
+
     # Indicateurs freeze
     user1_freeze_tag = " ❄" if user1_frozen else ""
     user2_freeze_tag = " ❄" if user2_frozen else ""
@@ -780,9 +792,18 @@ async def check_weekly_goals():
 
     week_number, year = get_week_info()
 
+    # Vérifier si c'est la première semaine du défi
     start_week = challenge[14] if len(challenge) > 14 else 0
     if start_week == week_number:
-        return
+        # Si créé un lundi, la semaine compte. Sinon, on ignore.
+        start_date_str = challenge[12] if len(challenge) > 12 else None
+        if start_date_str:
+            start_date = datetime.datetime.fromisoformat(start_date_str)
+            start_day = start_date.weekday()  # 0 = lundi, 6 = dimanche
+            if start_day != 0:  # Pas créé un lundi → ignorer cette semaine
+                return
+        else:
+            return  # Pas de date → ignorer par sécurité
 
     checkins = get_checkins_for_week(challenge[0], week_number, year)
 
@@ -952,6 +973,18 @@ async def send_reminders():
         return
 
     week_number, year = get_week_info()
+    
+    # Vérifier si c'est la première semaine et pas créé un lundi
+    start_week = challenge[14] if len(challenge) > 14 else 0
+    if start_week == week_number:
+        start_date_str = challenge[12] if len(challenge) > 12 else None
+        if start_date_str:
+            start_date = datetime.datetime.fromisoformat(start_date_str)
+            if start_date.weekday() != 0:  # Pas créé un lundi
+                return  # Pas de rappel, cette semaine ne compte pas
+        else:
+            return
+    
     checkins = get_checkins_for_week(challenge[0], week_number, year)
 
     days = get_days_remaining()
