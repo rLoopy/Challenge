@@ -391,7 +391,8 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment):
     embed.set_image(url=photo.url)
     embed.set_footer(text=f"◆ Challenge Bot • {datetime.datetime.now().strftime('%H:%M')}")
 
-    await interaction.response.send_message(embed=embed)
+    # Mention l'autre participant
+    await interaction.response.send_message(content=f"<@{other_id}>", embed=embed)
 
 
 @bot.tree.command(name="stats", description="Voir les statistiques")
@@ -973,7 +974,7 @@ async def send_reminders():
         return
 
     week_number, year = get_week_info()
-    
+
     # Vérifier si c'est la première semaine et pas créé un lundi
     start_week = challenge[14] if len(challenge) > 14 else 0
     if start_week == week_number:
@@ -984,7 +985,7 @@ async def send_reminders():
                 return  # Pas de rappel, cette semaine ne compte pas
         else:
             return
-    
+
     checkins = get_checkins_for_week(challenge[0], week_number, year)
 
     days = get_days_remaining()
