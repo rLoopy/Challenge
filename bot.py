@@ -8,6 +8,7 @@ from discord import app_commands
 import datetime
 import random
 import os
+import calendar
 from typing import Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -545,6 +546,105 @@ Cette action est irréversible."""
     await interaction.response.send_message(embed=embed, view=ConfirmView(), ephemeral=True)
 
 
+@bot.tree.command(name="calendar", description="Calendrier des sessions du mois")
+async def calendar_cmd(interaction: discord.Interaction):
+    challenge = get_active_challenge()
+    
+    if not challenge:
+        await interaction.response.send_message("Pas de défi actif.", ephemeral=True)
+        return
+    
+    user_id = interaction.user.id
+    if user_id not in [challenge[1], challenge[6]]:
+        await interaction.response.send_message("Tu ne participes pas.", ephemeral=True)
+        return
+    
+    # Déterminer l'utilisateur
+    if user_id == challenge[1]:
+        user_name = challenge[2]
+        user_activity = challenge[3]
+    else:
+        user_name = challenge[7]
+        user_activity = challenge[8]
+    
+    # Récupérer les check-ins du mois
+    now = datetime.datetime.now()
+    year = now.year
+    month = now.month
+    
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Récupérer tous les check-ins de ce mois pour cet utilisateur
+    c.execute('''
+        SELECT timestamp FROM checkins 
+        WHERE challenge_id = %s AND user_id = %s
+    ''', (challenge[0], user_id))
+    
+    rows = c.fetchall()
+    conn.close()
+    
+    # Extraire les jours avec check-in
+    checkin_days = set()
+    for row in rows:
+        ts = datetime.datetime.fromisoformat(row['timestamp'])
+        if ts.year == year and ts.month == month:
+            checkin_days.add(ts.day)
+    
+    # Générer le calendrier
+    cal = calendar.Calendar(firstweekday=0)  # Lundi = premier jour
+    
+    month_name = ["", "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
+                  "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"][month]
+    
+    # Header
+    cal_text = f"       {month_name} {year}\n"
+    cal_text += "Lu  Ma  Me  Je  Ve  Sa  Di\n"
+    
+    # Jours du mois
+    for week in cal.monthdayscalendar(year, month):
+        week_str = ""
+        for day in week:
+            if day == 0:
+                week_str += "    "  # Jour vide
+            elif day in checkin_days:
+                week_str += f"[{day:02d}]"  # Jour avec check-in
+            elif day == now.day:
+                week_str += f">{day:02d}<"  # Aujourd'hui
+            else:
+                week_str += f" {day:02d} "  # Jour normal
+        cal_text += week_str + "\n"
+    
+    # Stats du mois
+    total_month = len(checkin_days)
+    
+    embed = discord.Embed(color=EMBED_COLOR)
+    
+    embed.description = f"""▸ **CALENDRIER**
+
+**{user_name.upper()}** — {user_activity}
+
+```
+{cal_text}```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **LÉGENDE**
+```
+[XX] = Session validée
+>XX< = Aujourd'hui
+```
+
+◆ **CE MOIS**
+```
+Sessions: {total_month}
+```"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    
+    await interaction.response.send_message(embed=embed)
+
+
 @bot.tree.command(name="help", description="Aide")
 async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(color=EMBED_COLOR)
@@ -557,12 +657,13 @@ Un défi. Deux personnes. Pas d'excuses.
 
 ◆ **COMMANDES**
 ```
-/setup   — Créer un défi
-/checkin — Enregistrer une session
-/stats   — Voir la progression
-/freeze  — Pause (maladie, etc.)
-/unfreeze— Reprendre le défi
-/cancel  — Annuler le défi
+/setup    — Créer un défi
+/checkin  — Enregistrer une session
+/stats    — Voir la progression
+/calendar — Calendrier du mois
+/freeze   — Pause (maladie, etc.)
+/unfreeze — Reprendre le défi
+/cancel   — Annuler le défi
 ```
 
 ◆ **RÈGLES**
