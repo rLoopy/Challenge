@@ -549,16 +549,16 @@ Cette action est irréversible."""
 @bot.tree.command(name="calendar", description="Calendrier des sessions du mois")
 async def calendar_cmd(interaction: discord.Interaction):
     challenge = get_active_challenge()
-    
+
     if not challenge:
         await interaction.response.send_message("Pas de défi actif.", ephemeral=True)
         return
-    
+
     user_id = interaction.user.id
     if user_id not in [challenge[1], challenge[6]]:
         await interaction.response.send_message("Tu ne participes pas.", ephemeral=True)
         return
-    
+
     # Déterminer l'utilisateur
     if user_id == challenge[1]:
         user_name = challenge[2]
@@ -566,64 +566,64 @@ async def calendar_cmd(interaction: discord.Interaction):
     else:
         user_name = challenge[7]
         user_activity = challenge[8]
-    
+
     # Récupérer les check-ins du mois
     now = datetime.datetime.now()
     year = now.year
     month = now.month
     today = now.day
-    
+
     conn = get_db()
     c = conn.cursor()
-    
+
     # Récupérer tous les check-ins de ce mois pour cet utilisateur
     c.execute('''
         SELECT timestamp FROM checkins
         WHERE challenge_id = %s AND user_id = %s
     ''', (challenge[0], user_id))
-    
+
     rows = c.fetchall()
     conn.close()
-    
+
     # Extraire les jours avec check-in
     checkin_days = []
     for row in rows:
         ts = datetime.datetime.fromisoformat(row['timestamp'])
         if ts.year == year and ts.month == month:
             checkin_days.append(ts.day)
-    
+
     # Trier les jours
     checkin_days = sorted(set(checkin_days))
-    
+
     month_name = ["", "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
                   "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"][month]
-    
+
     # Noms des jours
     day_names = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
-    
+
     # Construire la timeline
     timeline = ""
     for day in checkin_days:
         # Trouver le jour de la semaine
         date = datetime.date(year, month, day)
         day_name = day_names[date.weekday()]
-        
+
         if day == today:
             timeline += f"│  {day:02d} {day_name} ━━━◆ aujourd'hui │\n"
         else:
             timeline += f"│  {day:02d} {day_name} ━━━━●            │\n"
-    
+
     # Si pas de check-ins
     if not checkin_days:
         timeline = "│                          │\n"
         timeline += "│    Aucune session        │\n"
         timeline += "│    ce mois               │\n"
         timeline += "│                          │\n"
-    
+
     total_month = len(checkin_days)
-    
+
     embed = discord.Embed(color=EMBED_COLOR)
-    
+
     embed.description = f"""▸ **CALENDRIER**
 
 **{user_name.upper()}** — {user_activity}
@@ -639,7 +639,7 @@ async def calendar_cmd(interaction: discord.Interaction):
 ```"""
 
     embed.set_footer(text="◆ Challenge Bot")
-    
+
     await interaction.response.send_message(embed=embed)
 
 
@@ -883,7 +883,7 @@ async def check_weekly_goals():
     """Vérifie les objectifs dimanche soir"""
     now = datetime.datetime.now()
 
-    if now.weekday() != 6 or now.hour != 23:
+    if now.weekday() != 6 or now.hour != 23 or now.minute < 30:
         return
 
     challenge = get_active_challenge()
