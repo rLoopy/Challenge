@@ -878,19 +878,23 @@ Bonne reprise !"""
 #                       SCHEDULED TASKS
 # ══════════════════════════════════════════════════════════════
 
-@tasks.loop(minutes=30)
+@tasks.loop(minutes=1)
 async def check_weekly_goals():
-    """Vérifie les objectifs dimanche soir"""
+    """Vérifie les objectifs à minuit pile (fin du dimanche)"""
     now = datetime.datetime.now()
-
-    if now.weekday() != 6 or now.hour != 23 or now.minute < 30:
+    
+    # Lundi 00h00 = minuit pile après dimanche
+    if now.weekday() != 0 or now.hour != 0 or now.minute != 0:
         return
 
     challenge = get_active_challenge()
     if not challenge:
         return
 
-    week_number, year = get_week_info()
+    # À minuit lundi, on vérifie la semaine qui vient de se terminer (dimanche = hier)
+    yesterday = now - datetime.timedelta(days=1)
+    iso = yesterday.isocalendar()
+    week_number, year = iso[1], iso[0]
 
     # Vérifier si c'est la première semaine du défi
     start_week = challenge[14] if len(challenge) > 14 else 0
