@@ -488,7 +488,7 @@ GAGE ———————————— {challenge[10][:15]}
 ◆ **DEADLINE**
 ```
 {time_status}
-Vérification: Dimanche 23h30
+Vérification: Dimanche minuit
 ```"""
 
     embed.set_footer(text=f"◆ Challenge Bot • Semaine {challenge_week}")
@@ -678,7 +678,7 @@ Un défi. Deux personnes. Pas d'excuses.
 1. Créez un défi avec `/setup`
 2. Faites vos sessions
 3. Validez avec `/checkin` + photo
-4. Dimanche 23h30 = vérification"""
+4. Dimanche minuit = vérification"""
 
     embed.set_footer(text="◆ Challenge Bot")
 
@@ -882,7 +882,7 @@ Bonne reprise !"""
 async def check_weekly_goals():
     """Vérifie les objectifs à minuit pile (fin du dimanche)"""
     now = datetime.datetime.now()
-    
+
     # Lundi 00h00 = minuit pile après dimanche
     if now.weekday() != 0 or now.hour != 0 or now.minute != 0:
         return
