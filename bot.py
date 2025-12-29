@@ -6,12 +6,16 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import datetime
+from zoneinfo import ZoneInfo
 import random
 import os
 import calendar
 from typing import Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+# Fuseau horaire français
+PARIS_TZ = ZoneInfo("Europe/Paris")
 
 # ══════════════════════════════════════════════════════════════
 #                       CONFIG
@@ -880,10 +884,10 @@ Bonne reprise !"""
 
 @tasks.loop(minutes=1)
 async def check_weekly_goals():
-    """Vérifie les objectifs à minuit pile (fin du dimanche)"""
-    now = datetime.datetime.now()
-
-    # Lundi 00h00 = minuit pile après dimanche
+    """Vérifie les objectifs à minuit pile heure française (fin du dimanche)"""
+    now = datetime.datetime.now(PARIS_TZ)
+    
+    # Lundi 00h00 heure française = minuit pile après dimanche
     if now.weekday() != 0 or now.hour != 0 or now.minute != 0:
         return
 
@@ -1067,7 +1071,7 @@ Les deux ont réussi !
 @tasks.loop(hours=12)
 async def send_reminders():
     """Rappels vendredi/samedi"""
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(PARIS_TZ)
 
     if now.weekday() not in [4, 5]:
         return
