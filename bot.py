@@ -550,7 +550,7 @@ Cette action est irréversible."""
     await interaction.response.send_message(embed=embed, view=ConfirmView(), ephemeral=True)
 
 
-@bot.tree.command(name="calendar", description="Calendrier des sessions du mois")
+@bot.tree.command(name="calendar", description="Calendrier des sessions (30 derniers jours)")
 async def calendar_cmd(interaction: discord.Interaction):
     challenge = get_active_challenge()
 
@@ -571,16 +571,15 @@ async def calendar_cmd(interaction: discord.Interaction):
         user_name = challenge[7]
         user_activity = challenge[8]
 
-    # Récupérer les check-ins du mois
+    # Récupérer les check-ins des 30 derniers jours
     now = datetime.datetime.now()
-    year = now.year
-    month = now.month
-    today = now.day
+    today = now.date()
+    thirty_days_ago = today - datetime.timedelta(days=30)
 
     conn = get_db()
     c = conn.cursor()
 
-    # Récupérer tous les check-ins de ce mois pour cet utilisateur
+    # Récupérer tous les check-ins pour cet utilisateur
     c.execute('''
         SELECT timestamp FROM checkins
         WHERE challenge_id = %s AND user_id = %s
@@ -589,42 +588,41 @@ async def calendar_cmd(interaction: discord.Interaction):
     rows = c.fetchall()
     conn.close()
 
-    # Extraire les jours avec check-in
-    checkin_days = []
+    # Extraire les dates avec check-in (30 derniers jours)
+    checkin_dates = []
     for row in rows:
         ts = datetime.datetime.fromisoformat(row['timestamp'])
-        if ts.year == year and ts.month == month:
-            checkin_days.append(ts.day)
+        ts_date = ts.date()
+        if ts_date >= thirty_days_ago and ts_date <= today:
+            checkin_dates.append(ts_date)
 
-    # Trier les jours
-    checkin_days = sorted(set(checkin_days))
-
-    month_name = ["", "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
-                  "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"][month]
+    # Trier les dates (uniques)
+    checkin_dates = sorted(set(checkin_dates))
 
     # Noms des jours
     day_names = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+    month_names = ["", "Jan", "Fév", "Mar", "Avr", "Mai", "Juin",
+                   "Juil", "Août", "Sep", "Oct", "Nov", "Déc"]
 
     # Construire la timeline
     timeline = ""
-    for day in checkin_days:
-        # Trouver le jour de la semaine
-        date = datetime.date(year, month, day)
-        day_name = day_names[date.weekday()]
+    for checkin_date in checkin_dates:
+        day_name = day_names[checkin_date.weekday()]
+        month_abbr = month_names[checkin_date.month]
 
-        if day == today:
-            timeline += f"│  {day:02d} {day_name} ━━━◆ aujourd'hui │\n"
+        if checkin_date == today:
+            timeline += f"│  {checkin_date.day:02d} {day_name} ━━◆ aujourd'hui  │\n"
         else:
-            timeline += f"│  {day:02d} {day_name} ━━━━●            │\n"
+            timeline += f"│  {checkin_date.day:02d} {day_name} ━━━●             │\n"
 
     # Si pas de check-ins
-    if not checkin_days:
+    if not checkin_dates:
         timeline = "│                          │\n"
         timeline += "│    Aucune session        │\n"
-        timeline += "│    ce mois               │\n"
+        timeline += "│    ces 30 derniers jours │\n"
         timeline += "│                          │\n"
 
-    total_month = len(checkin_days)
+    total_sessions = len(checkin_dates)
 
     embed = discord.Embed(color=EMBED_COLOR)
 
@@ -634,11 +632,11 @@ async def calendar_cmd(interaction: discord.Interaction):
 
 ```
 ╭──────────────────────────╮
-│    {month_name.upper():^14} {year}    │
+│    30 DERNIERS JOURS     │
 ├──────────────────────────┤
 │                          │
 {timeline}│                          │
-│  Sessions: {total_month:<14} │
+│  Sessions: {total_sessions:<14} │
 ╰──────────────────────────╯
 ```"""
 
@@ -886,7 +884,7 @@ Bonne reprise !"""
 async def check_weekly_goals():
     """Vérifie les objectifs à minuit pile heure française (fin du dimanche)"""
     now = datetime.datetime.now(PARIS_TZ)
-    
+
     # Lundi 00h00 heure française = minuit pile après dimanche
     if now.weekday() != 0 or now.hour != 0 or now.minute != 0:
         return
@@ -1095,7 +1093,14 @@ async def send_reminders():
 
     checkins = get_checkins_for_week(challenge[0], week_number, year)
 
-    days = get_days_remaining()
+    # Calculer les heures restantes jusqu'à dimanche minuit (lundi 00h00)
+    # Trouver le prochain lundi 00h00
+    days_until_monday = (7 - now.weekday()) % 7
+    if days_until_monday == 0:
+        days_until_monday = 7  # Si on est lundi, c'est dans 7 jours
+    next_monday = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=days_until_monday)
+    time_remaining = next_monday - now
+    hours_remaining = int(time_remaining.total_seconds() // 3600)
 
     channel = bot.get_channel(challenge[11])
     if not channel:
@@ -1122,7 +1127,7 @@ async def send_reminders():
         if user2_remaining > 0:
             reminder_text += f"<@{challenge[6]}> — **{user2_remaining}** session(s) restante(s)\n"
 
-        reminder_text += f"\n**{days}** jour(s) restant(s)."
+        reminder_text += f"\n**{hours_remaining}** heure(s) restante(s)."
 
         embed.description = reminder_text
         embed.set_footer(text="◆ Challenge Bot")
