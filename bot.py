@@ -660,9 +660,10 @@ Un défi. Deux personnes. Pas d'excuses.
 /setup    — Créer un défi
 /checkin  — Enregistrer une session
 /stats    — Voir la progression
-/calendar — Calendrier du mois
+/calendar — Calendrier (30 jours)
 /freeze   — Pause (maladie, etc.)
 /unfreeze — Reprendre le défi
+/rescue   — Sauver après oubli
 /cancel   — Annuler le défi
 ```
 
@@ -874,6 +875,175 @@ Bonne reprise !"""
     embed.set_footer(text="◆ Challenge Bot")
 
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="rescue", description="Sauver le défi après un oubli de check-in")
+@app_commands.describe(photo="Photo de ta session manquée")
+async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment):
+    """Permet de sauver un défi terminé si quelqu'un a oublié de check-in"""
+    user_id = interaction.user.id
+
+    # Récupérer le dernier défi inactif
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM challenge WHERE is_active = 0 ORDER BY id DESC LIMIT 1')
+    row = c.fetchone()
+
+    if not row:
+        conn.close()
+        await interaction.response.send_message("Aucun défi terminé à sauver.", ephemeral=True)
+        return
+
+    challenge = (
+        row['id'], row['user1_id'], row['user1_name'], row['user1_activity'],
+        row['user1_goal'], row['user1_gage'], row['user2_id'], row['user2_name'],
+        row['user2_activity'], row['user2_goal'], row['user2_gage'], row['channel_id'],
+        row['start_date'], row['is_active'], row['week_number'],
+        row['streak_user1'], row['streak_user2'], row['total_weeks'],
+        row.get('freeze_user1', 0) or 0, row.get('freeze_user2', 0) or 0
+    )
+
+    # Vérifier que l'utilisateur était participant
+    if user_id not in [challenge[1], challenge[6]]:
+        conn.close()
+        await interaction.response.send_message("Tu ne participais pas à ce défi.", ephemeral=True)
+        return
+
+    # Vérifier que c'est une image
+    if not photo.content_type or not photo.content_type.startswith('image/'):
+        conn.close()
+        await interaction.response.send_message("Image requise.", ephemeral=True)
+        return
+
+    # Vérifier que le défi n'a pas été terminé il y a trop longtemps (max 24h)
+    # On regarde l'historique
+    c.execute('SELECT end_date FROM history WHERE challenge_id = %s ORDER BY id DESC LIMIT 1', (challenge[0],))
+    history_row = c.fetchone()
+
+    if history_row:
+        end_date = datetime.datetime.fromisoformat(history_row['end_date'])
+        now = datetime.datetime.now(PARIS_TZ)
+        # Rendre end_date timezone-aware si nécessaire
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=PARIS_TZ)
+        hours_since_end = (now - end_date).total_seconds() / 3600
+
+        if hours_since_end > 24:
+            conn.close()
+            await interaction.response.send_message(
+                f"Trop tard ! Le défi a été terminé il y a {int(hours_since_end)}h. Limite: 24h.",
+                ephemeral=True
+            )
+            return
+
+    # Déterminer la semaine de l'échec (semaine précédente)
+    now = datetime.datetime.now(PARIS_TZ)
+    # Si on est lundi, la semaine échouée est celle d'hier (dimanche)
+    yesterday = now - datetime.timedelta(days=1)
+    iso = yesterday.isocalendar()
+    week_number, year = iso[1], iso[0]
+
+    # Si on est plus tard dans la semaine, prendre la semaine d'avant
+    if now.weekday() > 0:  # Pas lundi
+        last_sunday = now - datetime.timedelta(days=now.weekday())
+        iso = last_sunday.isocalendar()
+        week_number, year = iso[1], iso[0]
+
+    # Ajouter le check-in manquant
+    # On met un timestamp du dimanche 23h pour être dans la bonne semaine
+    rescue_timestamp = datetime.datetime.now().isoformat()
+
+    c.execute('''
+        INSERT INTO checkins (challenge_id, user_id, timestamp, week_number, year, photo_url)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    ''', (challenge[0], user_id, rescue_timestamp, week_number, year, photo.url))
+
+    # Recalculer les check-ins
+    checkins = get_checkins_for_week(challenge[0], week_number, year)
+
+    user1_count = checkins.get(challenge[1], 0)
+    user2_count = checkins.get(challenge[6], 0)
+
+    user1_goal = challenge[4]
+    user2_goal = challenge[9]
+
+    # Vérifier le freeze
+    user1_frozen = challenge[18]
+    user2_frozen = challenge[19]
+
+    user1_ok = user1_count >= user1_goal or user1_frozen
+    user2_ok = user2_count >= user2_goal or user2_frozen
+
+    if user1_ok and user2_ok:
+        # Les deux passent maintenant ! Réactiver le défi
+        c.execute('UPDATE challenge SET is_active = 1 WHERE id = %s', (challenge[0],))
+
+        # Supprimer l'entrée d'historique
+        c.execute('DELETE FROM history WHERE challenge_id = %s ORDER BY id DESC LIMIT 1', (challenge[0],))
+
+        conn.commit()
+        conn.close()
+
+        # Déterminer qui a été sauvé
+        if user_id == challenge[1]:
+            saved_name = challenge[2]
+        else:
+            saved_name = challenge[7]
+
+        embed = discord.Embed(color=EMBED_COLOR)
+        embed.description = f"""▸ **DÉFI SAUVÉ !**
+
+**{saved_name}** a ajouté son check-in manquant.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **NOUVEAU SCORE**
+```
+{challenge[2][:12]:12} ——— {user1_count}/{user1_goal} {"✓" if user1_ok else "✗"}
+{challenge[7][:12]:12} ——— {user2_count}/{user2_goal} {"✓" if user2_ok else "✗"}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▼ **Le défi continue !**
+Pas de gage cette fois. 😅"""
+
+        embed.set_image(url=photo.url)
+        embed.set_footer(text="◆ Challenge Bot • Rescue")
+
+        # Mentionner les deux participants
+        await interaction.response.send_message(
+            content=f"<@{challenge[1]}> <@{challenge[6]}>",
+            embed=embed
+        )
+
+    else:
+        # Toujours pas suffisant
+        conn.rollback()
+        conn.close()
+
+        if user_id == challenge[1]:
+            user_count = user1_count
+            user_goal = user1_goal
+        else:
+            user_count = user2_count
+            user_goal = user2_goal
+
+        embed = discord.Embed(color=EMBED_COLOR)
+        embed.description = f"""▸ **RESCUE IMPOSSIBLE**
+
+Même avec ce check-in, l'objectif n'est pas atteint.
+
+```
+Score actuel: {user_count}/{user_goal}
+Manquant: {user_goal - user_count}
+```
+
+Le défi reste terminé."""
+
+        embed.set_footer(text="◆ Challenge Bot")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════
