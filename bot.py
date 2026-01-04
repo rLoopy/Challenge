@@ -949,20 +949,17 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
         iso = last_sunday.isocalendar()
         week_number, year = iso[1], iso[0]
 
-    # Ajouter le check-in manquant
-    # On met un timestamp du dimanche 23h pour être dans la bonne semaine
-    rescue_timestamp = datetime.datetime.now().isoformat()
-
-    c.execute('''
-        INSERT INTO checkins (challenge_id, user_id, timestamp, week_number, year, photo_url)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    ''', (challenge[0], user_id, rescue_timestamp, week_number, year, photo.url))
-
-    # Recalculer les check-ins
+    # Récupérer les check-ins ACTUELS (avant d'ajouter le rescue)
     checkins = get_checkins_for_week(challenge[0], week_number, year)
 
     user1_count = checkins.get(challenge[1], 0)
     user2_count = checkins.get(challenge[6], 0)
+
+    # Ajouter +1 pour le rescue qu'on va faire
+    if user_id == challenge[1]:
+        user1_count += 1
+    else:
+        user2_count += 1
 
     user1_goal = challenge[4]
     user2_goal = challenge[9]
@@ -975,11 +972,18 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
     user2_ok = user2_count >= user2_goal or user2_frozen
 
     if user1_ok and user2_ok:
-        # Les deux passent maintenant ! Réactiver le défi
+        # Les deux passent maintenant ! Ajouter le check-in et réactiver
+        rescue_timestamp = datetime.datetime.now().isoformat()
+
+        c.execute('''
+            INSERT INTO checkins (challenge_id, user_id, timestamp, week_number, year, photo_url)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        ''', (challenge[0], user_id, rescue_timestamp, week_number, year, photo.url))
+
         c.execute('UPDATE challenge SET is_active = 1 WHERE id = %s', (challenge[0],))
 
         # Supprimer l'entrée d'historique
-        c.execute('DELETE FROM history WHERE challenge_id = %s ORDER BY id DESC LIMIT 1', (challenge[0],))
+        c.execute('DELETE FROM history WHERE challenge_id = %s', (challenge[0],))
 
         conn.commit()
         conn.close()
@@ -1018,15 +1022,14 @@ Pas de gage cette fois. 😅"""
         )
 
     else:
-        # Toujours pas suffisant
-        conn.rollback()
+        # Toujours pas suffisant - on n'ajoute pas le check-in
         conn.close()
 
         if user_id == challenge[1]:
-            user_count = user1_count
+            user_count = user1_count  # Inclut déjà le +1 du rescue
             user_goal = user1_goal
         else:
-            user_count = user2_count
+            user_count = user2_count  # Inclut déjà le +1 du rescue
             user_goal = user2_goal
 
         embed = discord.Embed(color=EMBED_COLOR)
@@ -1035,7 +1038,7 @@ Pas de gage cette fois. 😅"""
 Même avec ce check-in, l'objectif n'est pas atteint.
 
 ```
-Score actuel: {user_count}/{user_goal}
+Score avec rescue: {user_count}/{user_goal}
 Manquant: {user_goal - user_count}
 ```
 
