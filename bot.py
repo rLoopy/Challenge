@@ -93,8 +93,19 @@ def init_db():
             user_id BIGINT PRIMARY KEY,
             user_name TEXT NOT NULL,
             activity TEXT DEFAULT 'Sport',
-            weekly_goal INTEGER DEFAULT 4
+            weekly_goal INTEGER DEFAULT 4,
+            pending_goal INTEGER
         )
+    ''')
+
+    # Migration: ajouter pending_goal si n'existe pas
+    c.execute('''
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='profiles' AND column_name='pending_goal') THEN
+                ALTER TABLE profiles ADD COLUMN pending_goal INTEGER;
+            END IF;
+        END $$;
     ''')
 
     # Table des défis (par serveur)
@@ -178,6 +189,13 @@ def init_db():
             total_weeks INTEGER
         )
     ''')
+
+    # Créer les index pour optimiser les requêtes
+    c.execute('CREATE INDEX IF NOT EXISTS idx_challenge_guild ON challenge(guild_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_challenge_active ON challenge(is_active)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_challenge_users ON challenge(user1_id, user2_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_checkins_user ON checkins(user_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_checkins_week ON checkins(user_id, week_number, year)')
 
     conn.commit()
     conn.close()
@@ -328,6 +346,8 @@ async def profile_cmd(
     # Récupérer ou créer le profil
     profile = get_or_create_profile(user_id, user_name)
 
+    goal_change_msg = ""
+
     # Si des paramètres sont fournis, mettre à jour
     if activity is not None or goal is not None:
         if goal is not None and (goal <= 0 or goal > 7):
@@ -338,12 +358,30 @@ async def profile_cmd(
         c = conn.cursor()
 
         new_activity = activity if activity else profile['activity']
-        new_goal = goal if goal else profile['weekly_goal']
 
-        c.execute('''
-            UPDATE profiles SET activity = %s, weekly_goal = %s, user_name = %s
-            WHERE user_id = %s
-        ''', (new_activity, new_goal, user_name, user_id))
+        # Si changement de goal
+        if goal is not None and goal != profile['weekly_goal']:
+            now = datetime.datetime.now(PARIS_TZ)
+            # Si c'est lundi, appliquer immédiatement
+            if now.weekday() == 0:
+                c.execute('''
+                    UPDATE profiles SET activity = %s, weekly_goal = %s, pending_goal = NULL, user_name = %s
+                    WHERE user_id = %s
+                ''', (new_activity, goal, user_name, user_id))
+                goal_change_msg = f"\n✓ Objectif changé à {goal}x/semaine"
+            else:
+                # Sinon, mettre en pending pour lundi prochain
+                c.execute('''
+                    UPDATE profiles SET activity = %s, pending_goal = %s, user_name = %s
+                    WHERE user_id = %s
+                ''', (new_activity, goal, user_name, user_id))
+                goal_change_msg = f"\n⏳ Objectif passera à {goal}x/semaine lundi"
+        else:
+            c.execute('''
+                UPDATE profiles SET activity = %s, user_name = %s
+                WHERE user_id = %s
+            ''', (new_activity, user_name, user_id))
+
         conn.commit()
         conn.close()
 
@@ -355,6 +393,12 @@ async def profile_cmd(
     week_checkins = get_checkins_for_user_week(user_id, week_number, year)
     active_challenges = get_user_active_challenges(user_id)
 
+    # Afficher pending_goal si défini
+    pending_goal = profile.get('pending_goal')
+    goal_display = f"{profile['weekly_goal']}x/semaine"
+    if pending_goal:
+        goal_display += f" → {pending_goal}x lundi"
+
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""▸ **PROFIL**
 
@@ -365,7 +409,7 @@ async def profile_cmd(
 ◆ **CONFIGURATION**
 ```
 {format_stat_line("ACTIVITÉ", profile['activity'])}
-{format_stat_line("OBJECTIF", f"{profile['weekly_goal']}x/semaine")}
+{format_stat_line("OBJECTIF", goal_display)}
 ```
 
 ◆ **STATS**
@@ -377,7 +421,75 @@ async def profile_cmd(
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-▼ Modifier: `/profile activity:X goal:X`"""
+▼ Modifier: `/profile activity:X goal:X`{goal_change_msg}"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="challenges", description="Voir tous tes défis actifs")
+async def challenges_cmd(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user_name = interaction.user.display_name
+
+    challenges = get_user_active_challenges(user_id)
+
+    if not challenges:
+        await interaction.response.send_message("Tu n'as pas de défi actif.", ephemeral=True)
+        return
+
+    week_number, year = get_week_info()
+    profile = get_profile(user_id)
+    user_goal = profile['weekly_goal'] if profile else 4
+    user_count = get_checkins_for_user_week(user_id, week_number, year)
+
+    challenges_text = ""
+    for challenge in challenges:
+        # Trouver l'adversaire
+        if user_id == challenge['user1_id']:
+            other_name = challenge['user2_name']
+            other_id = challenge['user2_id']
+            my_gage = challenge['user1_gage']
+            is_frozen = challenge.get('freeze_user1', 0)
+        else:
+            other_name = challenge['user1_name']
+            other_id = challenge['user1_id']
+            my_gage = challenge['user2_gage']
+            is_frozen = challenge.get('freeze_user2', 0)
+
+        # Stats adversaire
+        other_profile = get_profile(other_id)
+        other_goal = other_profile['weekly_goal'] if other_profile else 4
+        other_count = get_checkins_for_user_week(other_id, week_number, year)
+
+        # Trouver le nom du serveur
+        guild = bot.get_guild(challenge['guild_id'])
+        guild_name = guild.name if guild else f"Serveur #{challenge['guild_id']}"
+
+        # Status
+        freeze_tag = " ❄" if is_frozen else ""
+        my_status = "✓" if user_count >= user_goal or is_frozen else f"{user_count}/{user_goal}"
+        other_status = f"{other_count}/{other_goal}"
+
+        challenges_text += f"""
+◆ **{guild_name}**{freeze_tag}
+```
+vs {other_name}
+Toi: {my_status} | Lui: {other_status}
+Gage: {my_gage[:20]}
+```
+"""
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **TES DÉFIS**
+
+**{user_name.upper()}** — {user_count}/{user_goal} cette semaine
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{challenges_text}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 Un check-in compte pour tous tes défis !"""
 
     embed.set_footer(text="◆ Challenge Bot")
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -586,19 +698,22 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
     embed.set_image(url=photo.url)
     embed.set_footer(text=f"◆ Challenge Bot • {datetime.datetime.now().strftime('%H:%M')}")
 
-    # Répondre à l'interaction originale
+    # Compter les autres serveurs où on doit cross-poster
+    current_guild_id = interaction.guild.id if interaction.guild else None
+    other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
+
+    # Ajouter le feedback cross-post prévu
+    if other_challenges:
+        embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
+
+    # Répondre à l'interaction originale (on doit répondre dans les 3 secondes)
     await interaction.response.send_message(embed=embed)
 
-    # Cross-poster sur les autres serveurs
-    current_guild_id = interaction.guild.id if interaction.guild else None
+    # Cross-poster sur les autres serveurs (après avoir répondu)
+    cross_post_success = 0
+    cross_post_fail = 0
 
-    for challenge in active_challenges:
-        challenge_guild_id = challenge['guild_id']
-
-        # Ne pas re-poster sur le serveur actuel
-        if challenge_guild_id == current_guild_id:
-            continue
-
+    for challenge in other_challenges:
         # Trouver le salon de check-in
         checkin_channel_id = challenge.get('checkin_channel_id') or challenge['channel_id']
         channel = bot.get_channel(checkin_channel_id)
@@ -638,8 +753,34 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
 
             try:
                 await channel.send(content=f"<@{other_id}>", embed=cross_embed)
+                cross_post_success += 1
             except Exception as e:
-                print(f"Erreur cross-post vers {challenge_guild_id}: {e}")
+                print(f"Erreur cross-post vers {challenge['guild_id']}: {e}")
+                cross_post_fail += 1
+        else:
+            cross_post_fail += 1
+
+    # Mettre à jour le message original avec le résultat du cross-post
+    if other_challenges:
+        cross_post_feedback = ""
+        if cross_post_success > 0:
+            cross_post_feedback = f"✓ Posté sur {cross_post_success} serveur(s)"
+        if cross_post_fail > 0:
+            if cross_post_feedback:
+                cross_post_feedback += " | "
+            cross_post_feedback += f"⚠ Échec: {cross_post_fail}"
+
+        # Mettre à jour l'embed
+        new_description = embed.description.replace(
+            f"📤 Cross-post vers {len(other_challenges)} serveur(s)...",
+            cross_post_feedback
+        )
+        embed.description = new_description
+
+        try:
+            await interaction.edit_original_response(embed=embed)
+        except:
+            pass  # Silently fail if we can't edit
 
 
 @bot.tree.command(name="stats", description="Voir les statistiques du défi")
@@ -903,10 +1044,11 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-◆ **PROFIL**
+◆ **PROFIL** (global)
 ```
-/profile  — Config activité + objectif
-/calendar — Ton calendrier perso
+/profile    — Config activité + objectif
+/calendar   — Ton calendrier perso
+/challenges — Tous tes défis actifs
 ```
 
 ◆ **DÉFI** (par serveur)
@@ -915,8 +1057,10 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 /checkin    — Session (cross-post auto)
 /stats      — Progression du défi
 /setchannel — Où poster les check-ins
-/freeze     — Pause (maladie, etc.)
-/unfreeze   — Reprendre le défi
+/freeze     — Pause ce serveur
+/unfreeze   — Reprendre ce serveur
+/freezeall  — Pause TOUS les défis
+/unfreezeall— Reprendre tout
 /rescue     — Sauver après oubli
 /cancel     — Annuler le défi
 ```
@@ -925,15 +1069,14 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 ```
 • Semaine = Lundi → Dimanche
 • Photo obligatoire
-• Check-ins partagés entre serveurs
 • Objectif manqué = GAME OVER
 ```
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ▼ **Multi-serveur**
-Ton profil et check-ins sont globaux.
-Un check-in compte pour tous tes défis !"""
+Check-ins partagés entre serveurs.
+Objectif modifié = appliqué lundi."""
 
     embed.set_footer(text="◆ Challenge Bot")
 
@@ -1192,6 +1335,103 @@ async def unfreeze_cmd(interaction: discord.Interaction):
     conn.commit()
     conn.close()
 
+
+@bot.tree.command(name="freezeall", description="Mettre en pause TOUS tes défis")
+@app_commands.describe(raison="Raison du freeze (optionnel)")
+async def freezeall_cmd(interaction: discord.Interaction, raison: str = "Non spécifiée"):
+    user_id = interaction.user.id
+    user_name = interaction.user.display_name
+
+    challenges = get_user_active_challenges(user_id)
+
+    if not challenges:
+        await interaction.response.send_message("Tu n'as pas de défi actif.", ephemeral=True)
+        return
+
+    conn = get_db()
+    c = conn.cursor()
+
+    frozen_count = 0
+    for challenge in challenges:
+        if user_id == challenge['user1_id']:
+            if not challenge.get('freeze_user1', 0):
+                c.execute('UPDATE challenge SET freeze_user1 = 1 WHERE id = %s', (challenge['id'],))
+                frozen_count += 1
+        else:
+            if not challenge.get('freeze_user2', 0):
+                c.execute('UPDATE challenge SET freeze_user2 = 1 WHERE id = %s', (challenge['id'],))
+                frozen_count += 1
+
+    conn.commit()
+    conn.close()
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **FREEZE GLOBAL ACTIVÉ**
+
+**{user_name}** est en pause sur **{frozen_count}** défi(s).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **RAISON**
+```
+{raison[:50]}
+```
+
+◆ **EFFET**
+```
+Objectif non requis cette semaine
+Sur tous tes défis actifs
+```
+
+▼ Utilise `/unfreezeall` pour reprendre."""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="unfreezeall", description="Reprendre TOUS tes défis")
+async def unfreezeall_cmd(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user_name = interaction.user.display_name
+
+    challenges = get_user_active_challenges(user_id)
+
+    if not challenges:
+        await interaction.response.send_message("Tu n'as pas de défi actif.", ephemeral=True)
+        return
+
+    conn = get_db()
+    c = conn.cursor()
+
+    unfrozen_count = 0
+    for challenge in challenges:
+        if user_id == challenge['user1_id']:
+            if challenge.get('freeze_user1', 0):
+                c.execute('UPDATE challenge SET freeze_user1 = 0 WHERE id = %s', (challenge['id'],))
+                unfrozen_count += 1
+        else:
+            if challenge.get('freeze_user2', 0):
+                c.execute('UPDATE challenge SET freeze_user2 = 0 WHERE id = %s', (challenge['id'],))
+                unfrozen_count += 1
+
+    conn.commit()
+    conn.close()
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **FREEZE GLOBAL DÉSACTIVÉ**
+
+**{user_name}** reprend **{unfrozen_count}** défi(s).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+L'objectif hebdomadaire est de nouveau requis
+sur tous tes défis.
+
+Bonne reprise !"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(embed=embed)
+
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""▸ **FREEZE DÉSACTIVÉ**
 
@@ -1378,6 +1618,17 @@ async def check_weekly_goals():
     # Lundi 00h00 heure française = minuit pile après dimanche
     if now.weekday() != 0 or now.hour != 0 or now.minute != 0:
         return
+
+    # Appliquer les pending_goals (changements d'objectif programmés)
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        UPDATE profiles
+        SET weekly_goal = pending_goal, pending_goal = NULL
+        WHERE pending_goal IS NOT NULL
+    ''')
+    conn.commit()
+    conn.close()
 
     # Récupérer TOUS les défis actifs
     challenges = get_all_active_challenges()
