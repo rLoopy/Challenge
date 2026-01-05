@@ -983,6 +983,64 @@ Cette action va supprimer **TOUTES** les données :
     await interaction.response.send_message(embed=embed, view=ConfirmReset(), ephemeral=True)
 
 
+@bot.tree.command(name="migrate", description="Migrer les anciens défis (admin)")
+async def migrate_cmd(interaction: discord.Interaction):
+    """Migre les anciens défis sans guild_id vers le nouveau format"""
+    if not interaction.guild:
+        await interaction.response.send_message("Commande serveur uniquement.", ephemeral=True)
+        return
+
+    guild_id = interaction.guild.id
+
+    conn = get_db()
+    c = conn.cursor()
+
+    # Trouver les défis actifs sans guild_id sur ce serveur (via channel_id)
+    # On récupère les channels du serveur actuel
+    guild_channel_ids = [ch.id for ch in interaction.guild.channels]
+
+    # Chercher les défis sans guild_id dont le channel_id est dans ce serveur
+    c.execute('SELECT * FROM challenge WHERE guild_id IS NULL AND is_active = 1')
+    orphan_challenges = c.fetchall()
+
+    migrated = 0
+    for challenge in orphan_challenges:
+        if challenge['channel_id'] in guild_channel_ids:
+            # Ce défi appartient à ce serveur
+            c.execute('UPDATE challenge SET guild_id = %s, checkin_channel_id = %s WHERE id = %s',
+                     (guild_id, challenge['channel_id'], challenge['id']))
+            migrated += 1
+
+            # Créer les profils pour les participants s'ils n'existent pas
+            c.execute('''
+                INSERT INTO profiles (user_id, user_name, activity, weekly_goal)
+                VALUES (%s, %s, 'Sport', %s)
+                ON CONFLICT (user_id) DO NOTHING
+            ''', (challenge['user1_id'], challenge['user1_name'], challenge.get('user1_goal', 4) or 4))
+
+            c.execute('''
+                INSERT INTO profiles (user_id, user_name, activity, weekly_goal)
+                VALUES (%s, %s, 'Sport', %s)
+                ON CONFLICT (user_id) DO NOTHING
+            ''', (challenge['user2_id'], challenge['user2_name'], challenge.get('user2_goal', 4) or 4))
+
+    conn.commit()
+    conn.close()
+
+    if migrated > 0:
+        embed = discord.Embed(color=EMBED_COLOR)
+        embed.description = f"""▸ **MIGRATION EFFECTUÉE**
+
+**{migrated}** défi(s) migré(s) vers ce serveur.
+
+Les profils ont été créés avec les objectifs existants.
+Utilise `/stats` pour vérifier."""
+        embed.set_footer(text="◆ Challenge Bot")
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message("Aucun défi à migrer trouvé.", ephemeral=True)
+
+
 @bot.tree.command(name="test", description="Vérifier l'état du bot")
 async def test_cmd(interaction: discord.Interaction):
     guild_id = interaction.guild.id if interaction.guild else None
