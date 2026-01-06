@@ -184,12 +184,16 @@ def init_db():
         )
     ''')
 
-    # Migration: ajouter note si n'existe pas, retirer challenge_id constraint
+    # Migration: ajouter note si n'existe pas, rendre challenge_id nullable
     c.execute('''
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='checkins' AND column_name='note') THEN
                 ALTER TABLE checkins ADD COLUMN note TEXT;
+            END IF;
+            -- Rendre challenge_id nullable (ancienne architecture)
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='checkins' AND column_name='challenge_id') THEN
+                ALTER TABLE checkins ALTER COLUMN challenge_id DROP NOT NULL;
             END IF;
         END $$;
     ''')
@@ -1007,10 +1011,10 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
     user_id = membre.id
     user_name = membre.display_name
     by_name = interaction.user.display_name
-    
+
     # Vérifier que la personne a au moins un défi actif
     active_challenges = get_user_active_challenges(user_id)
-    
+
     if not active_challenges:
         await interaction.response.send_message(f"{membre.mention} n'a pas de défi actif.", ephemeral=True)
         return
@@ -1024,7 +1028,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
 
     week_number, year = get_week_info()
     timestamp = datetime.datetime.now().isoformat()
-    
+
     checkin_note = f"[par {by_name}] {note}" if note else f"[par {by_name}]"
 
     c.execute('''
@@ -1079,12 +1083,12 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
     # Compter les serveurs pour cross-post
     current_guild_id = interaction.guild.id if interaction.guild else None
     other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
-    
+
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
-    
+
     await interaction.response.send_message(content=f"{membre.mention}", embed=embed)
-    
+
     # Cross-poster sur les autres serveurs
     cross_post_success = 0
     cross_post_fail = 0
@@ -1131,7 +1135,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
                 cross_post_fail += 1
         else:
             cross_post_fail += 1
-    
+
     # Mettre à jour avec le résultat
     if other_challenges:
         cross_post_feedback = ""
@@ -1141,13 +1145,13 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
             if cross_post_feedback:
                 cross_post_feedback += " | "
             cross_post_feedback += f"⚠ Échec: {cross_post_fail}"
-        
+
         new_description = embed.description.replace(
             f"📤 Cross-post vers {len(other_challenges)} serveur(s)...",
             cross_post_feedback
         )
         embed.description = new_description
-        
+
         try:
             await interaction.edit_original_response(embed=embed)
         except:
