@@ -499,13 +499,15 @@ Gage: {my_gage[:20]}
 @app_commands.describe(
     adversaire="Ton adversaire",
     ton_gage="Ton gage si tu perds",
-    son_gage="Son gage si il/elle perd"
+    son_gage="Son gage si il/elle perd",
+    son_objectif="Son objectif hebdo (optionnel, pour setup à sa place)"
 )
 async def setup(
     interaction: discord.Interaction,
     adversaire: discord.Member,
     ton_gage: str,
-    son_gage: str
+    son_gage: str,
+    son_objectif: Optional[int] = None
 ):
     if not interaction.guild:
         await interaction.response.send_message("Cette commande doit être utilisée dans un serveur.", ephemeral=True)
@@ -524,9 +526,22 @@ async def setup(
         await interaction.response.send_message("Tu ne peux pas te défier toi-même.", ephemeral=True)
         return
 
+    if son_objectif is not None and (son_objectif <= 0 or son_objectif > 7):
+        await interaction.response.send_message("Objectif entre 1 et 7.", ephemeral=True)
+        return
+
     # Récupérer/créer les profils
     profile1 = get_or_create_profile(user_id, interaction.user.display_name)
     profile2 = get_or_create_profile(adversaire.id, adversaire.display_name)
+    
+    # Si objectif adversaire spécifié, mettre à jour son profil
+    if son_objectif is not None:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('UPDATE profiles SET weekly_goal = %s WHERE user_id = %s', (son_objectif, adversaire.id))
+        conn.commit()
+        conn.close()
+        profile2 = get_profile(adversaire.id)  # Recharger
 
     conn = get_db()
     c = conn.cursor()
@@ -791,10 +806,10 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
 async def latecheckin(interaction: discord.Interaction, photo: discord.Attachment, note: Optional[str] = None):
     user_id = interaction.user.id
     user_name = interaction.user.display_name
-    
+
     # Vérifier que l'utilisateur a au moins un défi actif
     active_challenges = get_user_active_challenges(user_id)
-    
+
     if not active_challenges:
         await interaction.response.send_message("Tu n'as pas de défi actif.", ephemeral=True)
         return
@@ -806,11 +821,11 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     # Calculer hier
     now = datetime.datetime.now(PARIS_TZ)
     yesterday = now - datetime.timedelta(days=1)
-    
+
     # Vérifier que hier est dans la même semaine (pas la semaine dernière)
     yesterday_iso = yesterday.isocalendar()
     today_iso = now.isocalendar()
-    
+
     if yesterday_iso[1] != today_iso[1]:
         await interaction.response.send_message(
             "⚠ Hier était la semaine dernière. Utilise `/rescue` si le défi est terminé.",
@@ -828,7 +843,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     week_number = yesterday_iso[1]
     year = yesterday_iso[0]
     timestamp = yesterday.replace(hour=20, minute=0, second=0).isoformat()  # 20h hier
-    
+
     late_note = f"[HIER] {note}" if note else "[HIER]"
 
     c.execute('''
@@ -886,12 +901,12 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     # Compter les autres serveurs
     current_guild_id = interaction.guild.id if interaction.guild else None
     other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
-    
+
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
-    
+
     await interaction.response.send_message(embed=embed)
-    
+
     # Cross-poster sur les autres serveurs
     cross_post_success = 0
     cross_post_fail = 0
@@ -939,7 +954,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
                 cross_post_fail += 1
         else:
             cross_post_fail += 1
-    
+
     # Mettre à jour avec le résultat
     if other_challenges:
         cross_post_feedback = ""
@@ -949,13 +964,13 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             if cross_post_feedback:
                 cross_post_feedback += " | "
             cross_post_feedback += f"⚠ Échec: {cross_post_fail}"
-        
+
         new_description = embed.description.replace(
             f"📤 Cross-post vers {len(other_challenges)} serveur(s)...",
             cross_post_feedback
         )
         embed.description = new_description
-        
+
         try:
             await interaction.edit_original_response(embed=embed)
         except:
