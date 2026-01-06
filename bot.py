@@ -150,6 +150,26 @@ def init_db():
             END IF;
         END $$;
     ''')
+    
+    # Migration: rendre les anciennes colonnes nullable (pour compatibilité)
+    c.execute('''
+        DO $$
+        BEGIN
+            -- Rendre user1_activity nullable si elle existe
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user1_activity') THEN
+                ALTER TABLE challenge ALTER COLUMN user1_activity DROP NOT NULL;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user1_goal') THEN
+                ALTER TABLE challenge ALTER COLUMN user1_goal DROP NOT NULL;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user2_activity') THEN
+                ALTER TABLE challenge ALTER COLUMN user2_activity DROP NOT NULL;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user2_goal') THEN
+                ALTER TABLE challenge ALTER COLUMN user2_goal DROP NOT NULL;
+            END IF;
+        END $$;
+    ''')
 
     # Table des check-ins (global par utilisateur)
     c.execute('''
@@ -533,7 +553,7 @@ async def setup(
     # Récupérer/créer les profils
     profile1 = get_or_create_profile(user_id, interaction.user.display_name)
     profile2 = get_or_create_profile(adversaire.id, adversaire.display_name)
-    
+
     # Si objectif adversaire spécifié, mettre à jour son profil
     if son_objectif is not None:
         conn = get_db()
@@ -549,15 +569,16 @@ async def setup(
     week_number, year = get_week_info()
     start_date = datetime.datetime.now().isoformat()
 
+    # Note: on inclut user1_activity, user1_goal, user2_activity, user2_goal pour compatibilité avec l'ancien schéma
     c.execute('''
         INSERT INTO challenge
-        (guild_id, user1_id, user1_name, user1_gage,
-         user2_id, user2_name, user2_gage,
+        (guild_id, user1_id, user1_name, user1_activity, user1_goal, user1_gage,
+         user2_id, user2_name, user2_activity, user2_goal, user2_gage,
          channel_id, checkin_channel_id, start_date, week_number,
          streak_user1, streak_user2, total_weeks, freeze_user1, freeze_user2)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0, 0, 0)
-    ''', (guild_id, user_id, interaction.user.display_name, ton_gage,
-          adversaire.id, adversaire.display_name, son_gage,
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0, 0, 0)
+    ''', (guild_id, user_id, interaction.user.display_name, profile1['activity'], profile1['weekly_goal'], ton_gage,
+          adversaire.id, adversaire.display_name, profile2['activity'], profile2['weekly_goal'], son_gage,
           interaction.channel_id, interaction.channel_id, start_date, week_number))
 
     conn.commit()
