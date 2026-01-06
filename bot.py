@@ -783,6 +783,185 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
             pass  # Silently fail if we can't edit
 
 
+@bot.tree.command(name="latecheckin", description="Enregistrer une session d'hier")
+@app_commands.describe(
+    photo="Photo de ta session",
+    note="Note optionnelle"
+)
+async def latecheckin(interaction: discord.Interaction, photo: discord.Attachment, note: Optional[str] = None):
+    user_id = interaction.user.id
+    user_name = interaction.user.display_name
+    
+    # Vérifier que l'utilisateur a au moins un défi actif
+    active_challenges = get_user_active_challenges(user_id)
+    
+    if not active_challenges:
+        await interaction.response.send_message("Tu n'as pas de défi actif.", ephemeral=True)
+        return
+
+    if not photo.content_type or not photo.content_type.startswith('image/'):
+        await interaction.response.send_message("Image requise.", ephemeral=True)
+        return
+
+    # Calculer hier
+    now = datetime.datetime.now(PARIS_TZ)
+    yesterday = now - datetime.timedelta(days=1)
+    
+    # Vérifier que hier est dans la même semaine (pas la semaine dernière)
+    yesterday_iso = yesterday.isocalendar()
+    today_iso = now.isocalendar()
+    
+    if yesterday_iso[1] != today_iso[1]:
+        await interaction.response.send_message(
+            "⚠ Hier était la semaine dernière. Utilise `/rescue` si le défi est terminé.",
+            ephemeral=True
+        )
+        return
+
+    # Récupérer le profil
+    profile = get_or_create_profile(user_id, user_name)
+
+    # Enregistrer le check-in avec la date d'hier
+    conn = get_db()
+    c = conn.cursor()
+
+    week_number = yesterday_iso[1]
+    year = yesterday_iso[0]
+    timestamp = yesterday.replace(hour=20, minute=0, second=0).isoformat()  # 20h hier
+    
+    late_note = f"[HIER] {note}" if note else "[HIER]"
+
+    c.execute('''
+        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    ''', (user_id, timestamp, week_number, year, photo.url, late_note))
+
+    conn.commit()
+    conn.close()
+
+    # Compter les check-ins de la semaine
+    user_count = get_checkins_for_user_week(user_id, week_number, year)
+    user_goal = profile['weekly_goal']
+    user_activity = profile['activity']
+    days = get_days_remaining()
+
+    # Statut
+    if user_count >= user_goal:
+        status = "✓ VALIDÉ"
+        status_emoji = "★"
+    else:
+        status = "En cours"
+        status_emoji = "▸"
+
+    # Construire l'embed principal
+    note_text = f"\n📝 *{note}*" if note else ""
+    yesterday_str = yesterday.strftime('%d/%m')
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""{status_emoji} **{status.upper()}** (hier {yesterday_str})
+
+**{user_name.upper()}**
+
+{user_activity}
+**{user_count} / {user_goal}**{note_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **CETTE SEMAINE**
+```
+{progress_bar(user_count, user_goal)} {user_count}/{user_goal}
+```
+
+◆ **TEMPS RESTANT**
+```
+{format_stat_line("JOURS", f"{days}j")}
+{format_stat_line("DEADLINE", "Dimanche 23h")}
+```
+
+⏰ *Check-in enregistré pour hier*"""
+
+    embed.set_image(url=photo.url)
+    embed.set_footer(text=f"◆ Challenge Bot • Late check-in")
+
+    # Compter les autres serveurs
+    current_guild_id = interaction.guild.id if interaction.guild else None
+    other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
+    
+    if other_challenges:
+        embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # Cross-poster sur les autres serveurs
+    cross_post_success = 0
+    cross_post_fail = 0
+
+    for challenge in other_challenges:
+        checkin_channel_id = challenge.get('checkin_channel_id') or challenge['channel_id']
+        channel = bot.get_channel(checkin_channel_id)
+
+        if channel:
+            if user_id == challenge['user1_id']:
+                other_id = challenge['user2_id']
+                other_name = challenge['user2_name']
+            else:
+                other_id = challenge['user1_id']
+                other_name = challenge['user1_name']
+
+            other_profile = get_profile(other_id)
+            other_count = get_checkins_for_user_week(other_id, week_number, year)
+            other_goal = other_profile['weekly_goal'] if other_profile else 4
+
+            cross_embed = discord.Embed(color=EMBED_COLOR)
+            cross_embed.description = f"""{status_emoji} **CHECK-IN** (hier)
+
+**{user_name.upper()}**
+
+{user_activity}{note_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **PROGRESSION**
+```
+{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}
+{other_name[:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}
+```
+
+⏰ *Late check-in*"""
+
+            cross_embed.set_image(url=photo.url)
+            cross_embed.set_footer(text=f"◆ Challenge Bot • Cross-post")
+
+            try:
+                await channel.send(content=f"<@{other_id}>", embed=cross_embed)
+                cross_post_success += 1
+            except:
+                cross_post_fail += 1
+        else:
+            cross_post_fail += 1
+    
+    # Mettre à jour avec le résultat
+    if other_challenges:
+        cross_post_feedback = ""
+        if cross_post_success > 0:
+            cross_post_feedback = f"✓ Posté sur {cross_post_success} serveur(s)"
+        if cross_post_fail > 0:
+            if cross_post_feedback:
+                cross_post_feedback += " | "
+            cross_post_feedback += f"⚠ Échec: {cross_post_fail}"
+        
+        new_description = embed.description.replace(
+            f"📤 Cross-post vers {len(other_challenges)} serveur(s)...",
+            cross_post_feedback
+        )
+        embed.description = new_description
+        
+        try:
+            await interaction.edit_original_response(embed=embed)
+        except:
+            pass
+
+
 @bot.tree.command(name="stats", description="Voir les statistiques du défi")
 async def stats(interaction: discord.Interaction):
     if not interaction.guild:
@@ -1055,12 +1234,11 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 ```
 /setup      — Créer un défi
 /checkin    — Session (cross-post auto)
+/latecheckin— Session d'HIER
 /stats      — Progression du défi
 /setchannel — Où poster les check-ins
 /freeze     — Pause ce serveur
-/unfreeze   — Reprendre ce serveur
 /freezeall  — Pause TOUS les défis
-/unfreezeall— Reprendre tout
 /rescue     — Sauver après oubli
 /cancel     — Annuler le défi
 ```
