@@ -7,9 +7,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import datetime
 from zoneinfo import ZoneInfo
-import random
 import os
-import calendar
 from typing import Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -53,19 +51,22 @@ def format_stat_line(label: str, value: str, width: int = 12) -> str:
 
 def get_days_remaining() -> int:
     """Jours restants dans la semaine"""
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(PARIS_TZ)
     days = (6 - now.weekday())
     return days if days >= 0 else 0
 
 def get_week_info():
-    now = datetime.datetime.now()
+    """Retourne (week_number, year) avec le fuseau horaire français"""
+    now = datetime.datetime.now(PARIS_TZ)
     iso = now.isocalendar()
     return iso[1], iso[0]
 
 def get_challenge_week_number(challenge_start_date: str) -> int:
     """Retourne le numéro de semaine du défi (1, 2, 3...) depuis le début"""
     start = datetime.datetime.fromisoformat(challenge_start_date)
-    now = datetime.datetime.now()
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=PARIS_TZ)
+    now = datetime.datetime.now(PARIS_TZ)
     delta = now - start
     week_number = (delta.days // 7) + 1
     return max(1, week_number)
@@ -1684,13 +1685,18 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 ◆ **DÉFI** (par serveur)
 ```
 /setup      — Créer un défi
+/addplayer  — Ajouter un joueur
+/removeplayer— Retirer un joueur
+/setchannel — Salon des check-ins
 /checkin    — Session + photo
 /latecheckin— Session d'HIER
 /checkinfor — Session pour qqn d'autre
 /stats      — Progression du défi
-/freeze     — Pause ce serveur
+/freeze     — Pause (ce serveur)
+/unfreeze   — Reprendre
 /freezeall  — Pause TOUS les défis
-/rescue     — Sauver après oubli
+/unfreezeall— Reprendre tous
+/rescue     — Revenir après élimination
 /cancel     — Annuler le défi
 ```
 
@@ -1698,14 +1704,13 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 ```
 • Semaine = Lundi → Dimanche
 • Photo obligatoire
-• Objectif manqué = GAME OVER
+• Objectif manqué = ÉLIMINÉ
+• Défi continue avec restants
 ```
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-▼ **Multi-serveur**
-Check-ins partagés entre serveurs.
-Objectif modifié = appliqué lundi."""
+▼ Objectif modifié = appliqué lundi."""
 
     embed.set_footer(text="◆ Challenge Bot")
 
@@ -1724,6 +1729,7 @@ async def reset_cmd(interaction: discord.Interaction):
             c = conn.cursor()
             c.execute('DELETE FROM checkins')
             c.execute('DELETE FROM history')
+            c.execute('DELETE FROM challenge_participants')
             c.execute('DELETE FROM challenge')
             c.execute('DELETE FROM profiles')
             conn.commit()
@@ -2049,21 +2055,6 @@ Bonne reprise !"""
     embed.set_footer(text="◆ Challenge Bot")
     await interaction.response.send_message(embed=embed)
 
-    embed = discord.Embed(color=EMBED_COLOR)
-    embed.description = f"""▸ **FREEZE DÉSACTIVÉ**
-
-**{user_name}** reprend le défi.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-L'objectif hebdomadaire est de nouveau requis.
-
-Bonne reprise !"""
-
-    embed.set_footer(text="◆ Challenge Bot")
-
-    await interaction.response.send_message(embed=embed)
-
 
 @bot.tree.command(name="rescue", description="Revenir dans le défi après un oubli de check-in")
 @app_commands.describe(photo="Photo de ta session manquée")
@@ -2129,15 +2120,9 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
         )
         return
 
-    # Déterminer la semaine de l'échec
-    yesterday = now - datetime.timedelta(days=1)
-    iso = yesterday.isocalendar()
+    # La semaine de l'échec = semaine de end_date (le check hebdo tourne dimanche soir)
+    iso = end_date.isocalendar()
     week_number, year = iso[1], iso[0]
-
-    if now.weekday() > 0:
-        last_sunday = now - datetime.timedelta(days=now.weekday())
-        iso = last_sunday.isocalendar()
-        week_number, year = iso[1], iso[0]
 
     # Récupérer le profil pour l'objectif
     profile = get_profile(user_id)
