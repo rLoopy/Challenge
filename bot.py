@@ -108,31 +108,34 @@ def init_db():
         END $$;
     ''')
 
-    # Table des défis (par serveur)
+    # Table des défis (par serveur) - NOUVELLE STRUCTURE SIMPLIFIÉE
     c.execute('''
         CREATE TABLE IF NOT EXISTS challenge (
             id SERIAL PRIMARY KEY,
             guild_id BIGINT NOT NULL,
-            user1_id BIGINT NOT NULL,
-            user1_name TEXT NOT NULL,
-            user1_gage TEXT NOT NULL,
-            user2_id BIGINT NOT NULL,
-            user2_name TEXT NOT NULL,
-            user2_gage TEXT NOT NULL,
             channel_id BIGINT NOT NULL,
             checkin_channel_id BIGINT,
             start_date TEXT NOT NULL,
             is_active INTEGER DEFAULT 1,
             week_number INTEGER NOT NULL,
-            streak_user1 INTEGER DEFAULT 0,
-            streak_user2 INTEGER DEFAULT 0,
-            total_weeks INTEGER DEFAULT 0,
-            freeze_user1 INTEGER DEFAULT 0,
-            freeze_user2 INTEGER DEFAULT 0
+            total_weeks INTEGER DEFAULT 0
         )
     ''')
 
-    # Migration: ajouter les nouvelles colonnes si elles n'existent pas
+    # Table des participants (N participants par défi)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS challenge_participants (
+            id SERIAL PRIMARY KEY,
+            challenge_id INTEGER NOT NULL,
+            user_id BIGINT NOT NULL,
+            user_name TEXT NOT NULL,
+            gage TEXT NOT NULL,
+            freeze INTEGER DEFAULT 0,
+            streak INTEGER DEFAULT 0
+        )
+    ''')
+
+    # Migration: ajouter les colonnes manquantes à challenge si elles n'existent pas
     c.execute('''
         DO $$
         BEGIN
@@ -142,20 +145,31 @@ def init_db():
             IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='checkin_channel_id') THEN
                 ALTER TABLE challenge ADD COLUMN checkin_channel_id BIGINT;
             END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='freeze_user1') THEN
-                ALTER TABLE challenge ADD COLUMN freeze_user1 INTEGER DEFAULT 0;
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='freeze_user2') THEN
-                ALTER TABLE challenge ADD COLUMN freeze_user2 INTEGER DEFAULT 0;
-            END IF;
         END $$;
     ''')
 
-    # Migration: rendre les anciennes colonnes nullable (pour compatibilité)
+    # Migration: rendre les anciennes colonnes nullable (pour compatibilité durant migration)
     c.execute('''
         DO $$
         BEGIN
-            -- Rendre user1_activity nullable si elle existe
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user1_id') THEN
+                ALTER TABLE challenge ALTER COLUMN user1_id DROP NOT NULL;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user1_name') THEN
+                ALTER TABLE challenge ALTER COLUMN user1_name DROP NOT NULL;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user1_gage') THEN
+                ALTER TABLE challenge ALTER COLUMN user1_gage DROP NOT NULL;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user2_id') THEN
+                ALTER TABLE challenge ALTER COLUMN user2_id DROP NOT NULL;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user2_name') THEN
+                ALTER TABLE challenge ALTER COLUMN user2_name DROP NOT NULL;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user2_gage') THEN
+                ALTER TABLE challenge ALTER COLUMN user2_gage DROP NOT NULL;
+            END IF;
             IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user1_activity') THEN
                 ALTER TABLE challenge ALTER COLUMN user1_activity DROP NOT NULL;
             END IF;
@@ -167,6 +181,37 @@ def init_db():
             END IF;
             IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user2_goal') THEN
                 ALTER TABLE challenge ALTER COLUMN user2_goal DROP NOT NULL;
+            END IF;
+        END $$;
+    ''')
+
+    # Migration automatique: déplacer user1/user2 vers challenge_participants
+    c.execute('''
+        DO $$
+        BEGIN
+            -- Vérifier si la migration est nécessaire (anciennes colonnes existent)
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user1_id') THEN
+                -- Migrer user1 pour tous les challenges qui n'ont pas encore de participants
+                INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+                SELECT c.id, c.user1_id, c.user1_name, COALESCE(c.user1_gage, 'Gage non défini'),
+                       COALESCE(c.freeze_user1, 0), COALESCE(c.streak_user1, 0)
+                FROM challenge c
+                WHERE c.user1_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM challenge_participants cp
+                    WHERE cp.challenge_id = c.id AND cp.user_id = c.user1_id
+                );
+
+                -- Migrer user2 pour tous les challenges qui n'ont pas encore de participants
+                INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+                SELECT c.id, c.user2_id, c.user2_name, COALESCE(c.user2_gage, 'Gage non défini'),
+                       COALESCE(c.freeze_user2, 0), COALESCE(c.streak_user2, 0)
+                FROM challenge c
+                WHERE c.user2_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM challenge_participants cp
+                    WHERE cp.challenge_id = c.id AND cp.user_id = c.user2_id
+                );
             END IF;
         END $$;
     ''')
@@ -217,7 +262,8 @@ def init_db():
     # Créer les index pour optimiser les requêtes
     c.execute('CREATE INDEX IF NOT EXISTS idx_challenge_guild ON challenge(guild_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_challenge_active ON challenge(is_active)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_challenge_users ON challenge(user1_id, user2_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_participants_challenge ON challenge_participants(challenge_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_participants_user ON challenge_participants(user_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_checkins_user ON checkins(user_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_checkins_week ON checkins(user_id, week_number, year)')
 
@@ -269,14 +315,52 @@ def get_all_active_challenges():
     conn.close()
     return rows
 
+def get_challenge_participants(challenge_id):
+    """Récupère tous les participants d'un défi"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM challenge_participants WHERE challenge_id = %s', (challenge_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_participant(challenge_id, user_id):
+    """Récupère un participant spécifique d'un défi"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM challenge_participants WHERE challenge_id = %s AND user_id = %s', (challenge_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def add_participant(challenge_id, user_id, user_name, gage):
+    """Ajoute un participant à un défi"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+        VALUES (%s, %s, %s, %s, 0, 0)
+    ''', (challenge_id, user_id, user_name, gage))
+    conn.commit()
+    conn.close()
+
+def remove_participant(challenge_id, user_id):
+    """Retire un participant d'un défi"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('DELETE FROM challenge_participants WHERE challenge_id = %s AND user_id = %s', (challenge_id, user_id))
+    conn.commit()
+    conn.close()
+
 def get_user_active_challenges(user_id):
     """Récupère tous les défis actifs où un utilisateur participe"""
     conn = get_db()
     c = conn.cursor()
     c.execute('''
-        SELECT * FROM challenge
-        WHERE is_active = 1 AND (user1_id = %s OR user2_id = %s)
-    ''', (user_id, user_id))
+        SELECT c.* FROM challenge c
+        JOIN challenge_participants cp ON c.id = cp.challenge_id
+        WHERE c.is_active = 1 AND cp.user_id = %s
+    ''', (user_id,))
     rows = c.fetchall()
     conn.close()
     return rows
@@ -302,36 +386,13 @@ def get_total_checkins_user(user_id):
     conn.close()
     return result
 
-# Compatibilité avec l'ancien code
-def get_active_challenge():
-    """DEPRECATED - Récupère un défi actif (pour compatibilité)"""
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT * FROM challenge WHERE is_active = 1 ORDER BY id DESC LIMIT 1')
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def get_checkins_for_week(challenge_id, week_number, year):
-    """Récupère les check-ins de la semaine pour les utilisateurs d'un défi"""
-    # D'abord récupérer le challenge pour avoir les user_ids
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT user1_id, user2_id FROM challenge WHERE id = %s', (challenge_id,))
-    challenge = c.fetchone()
-    conn.close()
-
-    if not challenge:
-        return {}
-
-    user1_count = get_checkins_for_user_week(challenge['user1_id'], week_number, year)
-    user2_count = get_checkins_for_user_week(challenge['user2_id'], week_number, year)
-
-    return {challenge['user1_id']: user1_count, challenge['user2_id']: user2_count}
-
-def get_total_checkins(challenge_id, user_id):
-    """Récupère le total de check-ins d'un utilisateur"""
-    return get_total_checkins_user(user_id)
+def get_checkins_for_challenge_week(challenge_id, week_number, year):
+    """Récupère les check-ins de la semaine pour tous les participants d'un défi"""
+    participants = get_challenge_participants(challenge_id)
+    result = {}
+    for p in participants:
+        result[p['user_id']] = get_checkins_for_user_week(p['user_id'], week_number, year)
+    return result
 
 # ══════════════════════════════════════════════════════════════
 #                       BOT EVENTS
@@ -469,22 +530,12 @@ async def challenges_cmd(interaction: discord.Interaction):
 
     challenges_text = ""
     for challenge in challenges:
-        # Trouver l'adversaire
-        if user_id == challenge['user1_id']:
-            other_name = challenge['user2_name']
-            other_id = challenge['user2_id']
-            my_gage = challenge['user1_gage']
-            is_frozen = challenge.get('freeze_user1', 0)
-        else:
-            other_name = challenge['user1_name']
-            other_id = challenge['user1_id']
-            my_gage = challenge['user2_gage']
-            is_frozen = challenge.get('freeze_user2', 0)
+        participants = get_challenge_participants(challenge['id'])
+        my_participant = next((p for p in participants if p['user_id'] == user_id), None)
+        others = [p for p in participants if p['user_id'] != user_id]
 
-        # Stats adversaire
-        other_profile = get_profile(other_id)
-        other_goal = other_profile['weekly_goal'] if other_profile else 4
-        other_count = get_checkins_for_user_week(other_id, week_number, year)
+        my_gage = my_participant['gage'] if my_participant else "?"
+        is_frozen = my_participant.get('freeze', 0) if my_participant else 0
 
         # Trouver le nom du serveur
         guild = bot.get_guild(challenge['guild_id'])
@@ -493,13 +544,20 @@ async def challenges_cmd(interaction: discord.Interaction):
         # Status
         freeze_tag = " ❄" if is_frozen else ""
         my_status = "✓" if user_count >= user_goal or is_frozen else f"{user_count}/{user_goal}"
-        other_status = f"{other_count}/{other_goal}"
+
+        # Construire la liste des autres
+        others_text = ""
+        for other in others:
+            other_profile = get_profile(other['user_id'])
+            other_goal = other_profile['weekly_goal'] if other_profile else 4
+            other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
+            freeze_mark = "❄" if other.get('freeze', 0) else ""
+            others_text += f"{other['user_name'][:8]}: {other_count}/{other_goal}{freeze_mark} "
 
         challenges_text += f"""
 ◆ **{guild_name}**{freeze_tag}
 ```
-vs {other_name}
-Toi: {my_status} | Lui: {other_status}
+Toi: {my_status} | {others_text.strip()}
 Gage: {my_gage[:20]}
 ```
 """
@@ -543,7 +601,7 @@ async def setup(
     # Vérifier si un défi existe déjà sur ce serveur
     challenge = get_active_challenge_for_guild(guild_id)
     if challenge:
-        await interaction.response.send_message("Un défi est déjà en cours sur ce serveur.", ephemeral=True)
+        await interaction.response.send_message("Un défi est déjà en cours sur ce serveur. Utilise `/addplayer` pour ajouter quelqu'un.", ephemeral=True)
         return
 
     if user_id == adversaire.id:
@@ -573,17 +631,26 @@ async def setup(
     week_number, year = get_week_info()
     start_date = datetime.datetime.now().isoformat()
 
-    # Note: on inclut user1_activity, user1_goal, user2_activity, user2_goal pour compatibilité avec l'ancien schéma
+    # Créer le défi (nouvelle structure simplifiée)
     c.execute('''
         INSERT INTO challenge
-        (guild_id, user1_id, user1_name, user1_activity, user1_goal, user1_gage,
-         user2_id, user2_name, user2_activity, user2_goal, user2_gage,
-         channel_id, checkin_channel_id, start_date, week_number,
-         streak_user1, streak_user2, total_weeks, freeze_user1, freeze_user2)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0, 0, 0)
-    ''', (guild_id, user_id, interaction.user.display_name, profile1['activity'], profile1['weekly_goal'], ton_gage,
-          adversaire.id, adversaire.display_name, profile2['activity'], profile2['weekly_goal'], son_gage,
-          interaction.channel_id, interaction.channel_id, start_date, week_number))
+        (guild_id, channel_id, checkin_channel_id, start_date, week_number, total_weeks)
+        VALUES (%s, %s, %s, %s, %s, 0)
+        RETURNING id
+    ''', (guild_id, interaction.channel_id, interaction.channel_id, start_date, week_number))
+
+    challenge_id = c.fetchone()['id']
+
+    # Ajouter les participants
+    c.execute('''
+        INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+        VALUES (%s, %s, %s, %s, 0, 0)
+    ''', (challenge_id, user_id, interaction.user.display_name, ton_gage))
+
+    c.execute('''
+        INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+        VALUES (%s, %s, %s, %s, 0, 0)
+    ''', (challenge_id, adversaire.id, adversaire.display_name, son_gage))
 
     conn.commit()
     conn.close()
@@ -615,9 +682,10 @@ async def setup(
 
 ▼ **Règles**
 Lundi → Dimanche • Photo obligatoire
-Objectif manqué = **GAME OVER**
+Objectif manqué = **GAME OVER** (individuel)
 
-💡 Check-ins partagés sur tous vos serveurs"""
+💡 Check-ins partagés sur tous vos serveurs
+💡 Ajoute des joueurs avec `/addplayer`"""
 
     embed.set_footer(text=f"◆ Challenge Bot • {datetime.datetime.now().strftime('%d/%m/%Y')}")
 
@@ -640,7 +708,8 @@ async def setchannel_cmd(interaction: discord.Interaction, channel: discord.Text
 
     # Vérifier que l'utilisateur participe
     user_id = interaction.user.id
-    if user_id not in [challenge['user1_id'], challenge['user2_id']]:
+    participant = get_participant(challenge['id'], user_id)
+    if not participant:
         await interaction.response.send_message("Tu ne participes pas à ce défi.", ephemeral=True)
         return
 
@@ -657,6 +726,131 @@ Les check-ins seront postés dans {channel.mention}"""
     embed.set_footer(text="◆ Challenge Bot")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="addplayer", description="Ajouter un joueur au défi")
+@app_commands.describe(
+    joueur="Joueur à ajouter",
+    gage="Son gage si il/elle perd",
+    objectif="Son objectif hebdo (optionnel)"
+)
+async def addplayer_cmd(
+    interaction: discord.Interaction,
+    joueur: discord.Member,
+    gage: str,
+    objectif: Optional[int] = None
+):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande serveur uniquement.", ephemeral=True)
+        return
+
+    guild_id = interaction.guild.id
+    challenge = get_active_challenge_for_guild(guild_id)
+
+    if not challenge:
+        await interaction.response.send_message("Pas de défi actif. Utilise `/setup` d'abord.", ephemeral=True)
+        return
+
+    # Vérifier que la personne qui ajoute participe
+    user_id = interaction.user.id
+    participant = get_participant(challenge['id'], user_id)
+    if not participant:
+        await interaction.response.send_message("Tu ne participes pas à ce défi.", ephemeral=True)
+        return
+
+    # Vérifier que le joueur n'est pas déjà dans le défi
+    existing = get_participant(challenge['id'], joueur.id)
+    if existing:
+        await interaction.response.send_message(f"{joueur.display_name} participe déjà.", ephemeral=True)
+        return
+
+    if objectif is not None and (objectif <= 0 or objectif > 7):
+        await interaction.response.send_message("Objectif entre 1 et 7.", ephemeral=True)
+        return
+
+    # Créer/récupérer le profil du joueur
+    profile = get_or_create_profile(joueur.id, joueur.display_name)
+
+    # Si objectif spécifié, mettre à jour
+    if objectif is not None:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('UPDATE profiles SET weekly_goal = %s WHERE user_id = %s', (objectif, joueur.id))
+        conn.commit()
+        conn.close()
+        profile = get_profile(joueur.id)
+
+    # Ajouter le participant
+    add_participant(challenge['id'], joueur.id, joueur.display_name, gage)
+
+    participants = get_challenge_participants(challenge['id'])
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **JOUEUR AJOUTÉ**
+
+**{joueur.display_name}** rejoint le défi !
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **CONFIGURATION**
+```
+{format_stat_line("ACTIVITÉ", profile['activity'])}
+{format_stat_line("OBJECTIF", f"{profile['weekly_goal']}x/semaine")}
+{format_stat_line("GAGE", gage[:20])}
+```
+
+◆ **PARTICIPANTS** ({len(participants)})
+{', '.join([p['user_name'] for p in participants])}"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+
+    await interaction.response.send_message(f"<@{joueur.id}>", embed=embed)
+
+
+@bot.tree.command(name="removeplayer", description="Retirer un joueur du défi")
+@app_commands.describe(joueur="Joueur à retirer")
+async def removeplayer_cmd(interaction: discord.Interaction, joueur: discord.Member):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande serveur uniquement.", ephemeral=True)
+        return
+
+    guild_id = interaction.guild.id
+    challenge = get_active_challenge_for_guild(guild_id)
+
+    if not challenge:
+        await interaction.response.send_message("Pas de défi actif.", ephemeral=True)
+        return
+
+    # Vérifier que le joueur participe
+    existing = get_participant(challenge['id'], joueur.id)
+    if not existing:
+        await interaction.response.send_message(f"{joueur.display_name} ne participe pas.", ephemeral=True)
+        return
+
+    # Vérifier qu'il reste au moins 2 participants après
+    participants = get_challenge_participants(challenge['id'])
+    if len(participants) <= 2:
+        await interaction.response.send_message("Il doit rester au moins 2 participants. Utilise `/cancel` pour annuler le défi.", ephemeral=True)
+        return
+
+    # Retirer le participant
+    remove_participant(challenge['id'], joueur.id)
+
+    participants = get_challenge_participants(challenge['id'])
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **JOUEUR RETIRÉ**
+
+**{joueur.display_name}** quitte le défi.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **PARTICIPANTS RESTANTS** ({len(participants)})
+{', '.join([p['user_name'] for p in participants])}"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="checkin", description="Enregistrer une session")
@@ -759,20 +953,22 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
         channel = bot.get_channel(checkin_channel_id)
 
         if channel:
-            # Trouver l'adversaire
-            if user_id == challenge['user1_id']:
-                other_id = challenge['user2_id']
-                other_name = challenge['user2_name']
-            else:
-                other_id = challenge['user1_id']
-                other_name = challenge['user1_name']
+            # Récupérer tous les participants
+            participants = get_challenge_participants(challenge['id'])
+            others = [p for p in participants if p['user_id'] != user_id]
 
-            # Récupérer le profil et stats de l'adversaire
-            other_profile = get_profile(other_id)
-            other_count = get_checkins_for_user_week(other_id, week_number, year)
-            other_goal = other_profile['weekly_goal'] if other_profile else 4
+            # Construire la progression de tous les participants
+            progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+            ping_ids = []
 
-            # Embed pour ce serveur avec progression des deux
+            for other in others:
+                other_profile = get_profile(other['user_id'])
+                other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
+                other_goal = other_profile['weekly_goal'] if other_profile else 4
+                progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
+                ping_ids.append(other['user_id'])
+
+            # Embed pour ce serveur avec progression de tous
             cross_embed = discord.Embed(color=EMBED_COLOR)
             cross_embed.description = f"""{status_emoji} **CHECK-IN**
 
@@ -784,15 +980,15 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
 
 ◆ **PROGRESSION**
 ```
-{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}
-{other_name[:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}
+{progression_text.strip()}
 ```"""
 
             cross_embed.set_image(url=photo.url)
             cross_embed.set_footer(text=f"◆ Challenge Bot • Cross-post")
 
             try:
-                await channel.send(content=f"<@{other_id}>", embed=cross_embed)
+                ping_content = " ".join([f"<@{pid}>" for pid in ping_ids])
+                await channel.send(content=ping_content, embed=cross_embed)
                 cross_post_success += 1
             except Exception as e:
                 print(f"Erreur cross-post vers {challenge['guild_id']}: {e}")
@@ -941,16 +1137,18 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
         channel = bot.get_channel(checkin_channel_id)
 
         if channel:
-            if user_id == challenge['user1_id']:
-                other_id = challenge['user2_id']
-                other_name = challenge['user2_name']
-            else:
-                other_id = challenge['user1_id']
-                other_name = challenge['user1_name']
+            participants = get_challenge_participants(challenge['id'])
+            others = [p for p in participants if p['user_id'] != user_id]
 
-            other_profile = get_profile(other_id)
-            other_count = get_checkins_for_user_week(other_id, week_number, year)
-            other_goal = other_profile['weekly_goal'] if other_profile else 4
+            progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+            ping_ids = []
+
+            for other in others:
+                other_profile = get_profile(other['user_id'])
+                other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
+                other_goal = other_profile['weekly_goal'] if other_profile else 4
+                progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
+                ping_ids.append(other['user_id'])
 
             cross_embed = discord.Embed(color=EMBED_COLOR)
             cross_embed.description = f"""{status_emoji} **CHECK-IN** (hier)
@@ -963,8 +1161,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
 
 ◆ **PROGRESSION**
 ```
-{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}
-{other_name[:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}
+{progression_text.strip()}
 ```
 
 ⏰ *Late check-in*"""
@@ -973,7 +1170,8 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             cross_embed.set_footer(text=f"◆ Challenge Bot • Cross-post")
 
             try:
-                await channel.send(content=f"<@{other_id}>", embed=cross_embed)
+                ping_content = " ".join([f"<@{pid}>" for pid in ping_ids])
+                await channel.send(content=ping_content, embed=cross_embed)
                 cross_post_success += 1
             except:
                 cross_post_fail += 1
@@ -1098,16 +1296,18 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
         channel = bot.get_channel(checkin_channel_id)
 
         if channel:
-            if user_id == challenge['user1_id']:
-                other_id = challenge['user2_id']
-                other_name_c = challenge['user2_name']
-            else:
-                other_id = challenge['user1_id']
-                other_name_c = challenge['user1_name']
+            participants = get_challenge_participants(challenge['id'])
+            others = [p for p in participants if p['user_id'] != user_id]
 
-            other_profile = get_profile(other_id)
-            other_count = get_checkins_for_user_week(other_id, week_number, year)
-            other_goal = other_profile['weekly_goal'] if other_profile else 4
+            progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+            ping_ids = []
+
+            for other in others:
+                other_profile = get_profile(other['user_id'])
+                other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
+                other_goal = other_profile['weekly_goal'] if other_profile else 4
+                progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
+                ping_ids.append(other['user_id'])
 
             cross_embed = discord.Embed(color=EMBED_COLOR)
             cross_embed.description = f"""{status_emoji} **CHECK-IN**
@@ -1120,8 +1320,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
 
 ◆ **PROGRESSION**
 ```
-{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}
-{other_name_c[:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}
+{progression_text.strip()}
 ```
 
 👤 *Par {by_name}*"""
@@ -1129,7 +1328,8 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
             cross_embed.set_footer(text=f"◆ Challenge Bot • Cross-post")
 
             try:
-                await channel.send(content=f"<@{other_id}>", embed=cross_embed)
+                ping_content = " ".join([f"<@{pid}>" for pid in ping_ids])
+                await channel.send(content=ping_content, embed=cross_embed)
                 cross_post_success += 1
             except:
                 cross_post_fail += 1
@@ -1172,57 +1372,66 @@ async def stats(interaction: discord.Interaction):
         return
 
     week_number, year = get_week_info()
-
-    # Récupérer les profils pour les objectifs
-    profile1 = get_profile(challenge['user1_id'])
-    profile2 = get_profile(challenge['user2_id'])
-
-    user1_goal = profile1['weekly_goal'] if profile1 else 4
-    user2_goal = profile2['weekly_goal'] if profile2 else 4
-    user1_activity = profile1['activity'] if profile1 else 'Sport'
-    user2_activity = profile2['activity'] if profile2 else 'Sport'
-
-    user1_count = get_checkins_for_user_week(challenge['user1_id'], week_number, year)
-    user2_count = get_checkins_for_user_week(challenge['user2_id'], week_number, year)
-
-    user1_total = get_total_checkins_user(challenge['user1_id'])
-    user2_total = get_total_checkins_user(challenge['user2_id'])
+    participants = get_challenge_participants(challenge['id'])
 
     challenge_week = get_challenge_week_number(challenge['start_date'])
     days = get_days_remaining()
 
-    # Vérifier si c'est une semaine "d'échauffement" (créé en cours de semaine, pas un lundi)
+    # Vérifier si c'est une semaine "d'échauffement"
     warmup_week = False
     start_week = challenge.get('week_number', 0)
     if start_week == week_number:
         start_date_str = challenge.get('start_date')
         if start_date_str:
             start_date = datetime.datetime.fromisoformat(start_date_str)
-            if start_date.weekday() != 0:  # Pas créé un lundi
+            if start_date.weekday() != 0:
                 warmup_week = True
 
-    # Vérifier le freeze
-    user1_frozen = challenge.get('freeze_user1', 0)
-    user2_frozen = challenge.get('freeze_user2', 0)
+    # Construire les stats de chaque participant
+    participants_stats = []
+    all_validated = True
+    leader = None
+    leader_pct = -1
 
-    # Déterminer le leader
-    user1_pct = user1_count / user1_goal if user1_goal > 0 else 0
-    user2_pct = user2_count / user2_goal if user2_goal > 0 else 0
+    for p in participants:
+        profile = get_profile(p['user_id'])
+        goal = profile['weekly_goal'] if profile else 4
+        activity = profile['activity'] if profile else 'Sport'
+        count = get_checkins_for_user_week(p['user_id'], week_number, year)
+        total = get_total_checkins_user(p['user_id'])
+        frozen = p.get('freeze', 0)
 
+        pct = count / goal if goal > 0 else 0
+        validated = count >= goal or frozen
+
+        if not validated and not frozen:
+            all_validated = False
+
+        if pct > leader_pct and not frozen:
+            leader_pct = pct
+            leader = p['user_name']
+
+        participants_stats.append({
+            'name': p['user_name'],
+            'activity': activity,
+            'goal': goal,
+            'count': count,
+            'total': total,
+            'frozen': frozen,
+            'gage': p['gage'],
+            'validated': validated,
+            'pct': pct
+        })
+
+    # Status général
     if warmup_week:
         status_text = "⚡ Semaine d'échauffement (non comptée)"
-    elif user1_count >= user1_goal and user2_count >= user2_goal:
-        status_text = "✓ Les deux ont validé"
-    elif user1_pct > user2_pct:
-        status_text = f"▸ {challenge['user1_name']} mène"
-    elif user2_pct > user1_pct:
-        status_text = f"▸ {challenge['user2_name']} mène"
+    elif all_validated:
+        status_text = "✓ Tous ont validé"
+    elif leader:
+        status_text = f"▸ {leader} mène"
     else:
-        status_text = "▸ Égalité"
-
-    # Indicateurs freeze
-    user1_freeze_tag = " ❄" if user1_frozen else ""
-    user2_freeze_tag = " ❄" if user2_frozen else ""
+        status_text = "▸ En cours"
 
     # Calcul du temps restant
     if days == 0:
@@ -1232,6 +1441,24 @@ async def stats(interaction: discord.Interaction):
     else:
         time_status = f"{days} jours restants"
 
+    # Construire l'embed avec tous les participants
+    participants_text = ""
+    for ps in participants_stats:
+        freeze_tag = " ❄" if ps['frozen'] else ""
+        status_mark = "✓" if ps['validated'] else ""
+        freeze_mark = "FREEZE" if ps['frozen'] else ""
+
+        participants_text += f"""
+◆ **{ps['name'].upper()}**{freeze_tag} — {ps['activity']}
+```
+CETTE SEMAINE ——— {ps['count']}/{ps['goal']}
+{progress_bar(ps['count'], ps['goal'])} {status_mark}{freeze_mark}
+
+TOTAL ——————————— {ps['total']}
+GAGE ———————————— {ps['gage'][:15]}
+```
+"""
+
     embed = discord.Embed(color=EMBED_COLOR)
 
     embed.description = f"""▸ **SEMAINE {challenge_week}**
@@ -1239,25 +1466,7 @@ async def stats(interaction: discord.Interaction):
 {status_text}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-◆ **{challenge['user1_name'].upper()}**{user1_freeze_tag} — {user1_activity}
-```
-CETTE SEMAINE ——— {user1_count}/{user1_goal}
-{progress_bar(user1_count, user1_goal)} {"✓" if user1_count >= user1_goal else ""}{"FREEZE" if user1_frozen else ""}
-
-TOTAL ——————————— {user1_total}
-GAGE ———————————— {challenge['user1_gage'][:15]}
-```
-
-◆ **{challenge['user2_name'].upper()}**{user2_freeze_tag} — {user2_activity}
-```
-CETTE SEMAINE ——— {user2_count}/{user2_goal}
-{progress_bar(user2_count, user2_goal)} {"✓" if user2_count >= user2_goal else ""}{"FREEZE" if user2_frozen else ""}
-
-TOTAL ——————————— {user2_total}
-GAGE ———————————— {challenge['user2_gage'][:15]}
-```
-
+{participants_text}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ◆ **DEADLINE**
@@ -1266,7 +1475,7 @@ GAGE ———————————— {challenge['user2_gage'][:15]}
 Vérification: Dimanche minuit
 ```"""
 
-    embed.set_footer(text=f"◆ Challenge Bot • Semaine {challenge_week}")
+    embed.set_footer(text=f"◆ Challenge Bot • Semaine {challenge_week} • {len(participants)} participants")
 
     await interaction.response.send_message(embed=embed)
 
@@ -1284,7 +1493,8 @@ async def cancel(interaction: discord.Interaction):
         await interaction.response.send_message("Pas de défi actif sur ce serveur.", ephemeral=True)
         return
 
-    if interaction.user.id not in [challenge['user1_id'], challenge['user2_id']]:
+    participant = get_participant(challenge['id'], interaction.user.id)
+    if not participant:
         await interaction.response.send_message("Réservé aux participants.", ephemeral=True)
         return
 
@@ -1622,34 +1832,27 @@ async def freeze_cmd(interaction: discord.Interaction, raison: str = "Non spéci
         return
 
     user_id = interaction.user.id
-    if user_id not in [challenge['user1_id'], challenge['user2_id']]:
+    participant = get_participant(challenge['id'], user_id)
+
+    if not participant:
         await interaction.response.send_message("Tu ne participes pas.", ephemeral=True)
         return
 
-    # Vérifier si déjà en freeze
-    if user_id == challenge['user1_id']:
-        is_frozen = challenge.get('freeze_user1', 0)
-        freeze_col = "freeze_user1"
-        user_name = challenge['user1_name']
-    else:
-        is_frozen = challenge.get('freeze_user2', 0)
-        freeze_col = "freeze_user2"
-        user_name = challenge['user2_name']
-
-    if is_frozen:
+    if participant.get('freeze', 0):
         await interaction.response.send_message("Tu es déjà en freeze.", ephemeral=True)
         return
 
     conn = get_db()
     c = conn.cursor()
-    c.execute(f'UPDATE challenge SET {freeze_col} = 1 WHERE id = %s', (challenge['id'],))
+    c.execute('UPDATE challenge_participants SET freeze = 1 WHERE challenge_id = %s AND user_id = %s',
+              (challenge['id'], user_id))
     conn.commit()
     conn.close()
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""▸ **FREEZE ACTIVÉ**
 
-**{user_name}** est en pause sur ce serveur.
+**{participant['user_name']}** est en pause sur ce serveur.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1685,29 +1888,30 @@ async def unfreeze_cmd(interaction: discord.Interaction):
         return
 
     user_id = interaction.user.id
-    if user_id not in [challenge['user1_id'], challenge['user2_id']]:
+    participant = get_participant(challenge['id'], user_id)
+
+    if not participant:
         await interaction.response.send_message("Tu ne participes pas.", ephemeral=True)
         return
 
-    # Vérifier si en freeze
-    if user_id == challenge['user1_id']:
-        is_frozen = challenge.get('freeze_user1', 0)
-        freeze_col = "freeze_user1"
-        user_name = challenge['user1_name']
-    else:
-        is_frozen = challenge.get('freeze_user2', 0)
-        freeze_col = "freeze_user2"
-        user_name = challenge['user2_name']
-
-    if not is_frozen:
+    if not participant.get('freeze', 0):
         await interaction.response.send_message("Tu n'es pas en freeze.", ephemeral=True)
         return
 
     conn = get_db()
     c = conn.cursor()
-    c.execute(f'UPDATE challenge SET {freeze_col} = 0 WHERE id = %s', (challenge['id'],))
+    c.execute('UPDATE challenge_participants SET freeze = 0 WHERE challenge_id = %s AND user_id = %s',
+              (challenge['id'], user_id))
     conn.commit()
     conn.close()
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **FREEZE DÉSACTIVÉ**
+
+**{participant['user_name']}** reprend le défi !"""
+    embed.set_footer(text="◆ Challenge Bot")
+
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="freezeall", description="Mettre en pause TOUS tes défis")
@@ -1727,14 +1931,11 @@ async def freezeall_cmd(interaction: discord.Interaction, raison: str = "Non sp�
 
     frozen_count = 0
     for challenge in challenges:
-        if user_id == challenge['user1_id']:
-            if not challenge.get('freeze_user1', 0):
-                c.execute('UPDATE challenge SET freeze_user1 = 1 WHERE id = %s', (challenge['id'],))
-                frozen_count += 1
-        else:
-            if not challenge.get('freeze_user2', 0):
-                c.execute('UPDATE challenge SET freeze_user2 = 1 WHERE id = %s', (challenge['id'],))
-                frozen_count += 1
+        participant = get_participant(challenge['id'], user_id)
+        if participant and not participant.get('freeze', 0):
+            c.execute('UPDATE challenge_participants SET freeze = 1 WHERE challenge_id = %s AND user_id = %s',
+                      (challenge['id'], user_id))
+            frozen_count += 1
 
     conn.commit()
     conn.close()
@@ -1779,14 +1980,11 @@ async def unfreezeall_cmd(interaction: discord.Interaction):
 
     unfrozen_count = 0
     for challenge in challenges:
-        if user_id == challenge['user1_id']:
-            if challenge.get('freeze_user1', 0):
-                c.execute('UPDATE challenge SET freeze_user1 = 0 WHERE id = %s', (challenge['id'],))
-                unfrozen_count += 1
-        else:
-            if challenge.get('freeze_user2', 0):
-                c.execute('UPDATE challenge SET freeze_user2 = 0 WHERE id = %s', (challenge['id'],))
-                unfrozen_count += 1
+        participant = get_participant(challenge['id'], user_id)
+        if participant and participant.get('freeze', 0):
+            c.execute('UPDATE challenge_participants SET freeze = 0 WHERE challenge_id = %s AND user_id = %s',
+                      (challenge['id'], user_id))
+            unfrozen_count += 1
 
     conn.commit()
     conn.close()
@@ -1822,61 +2020,71 @@ Bonne reprise !"""
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="rescue", description="Sauver le défi après un oubli de check-in")
+@bot.tree.command(name="rescue", description="Revenir dans le défi après un oubli de check-in")
 @app_commands.describe(photo="Photo de ta session manquée")
 async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment):
-    """Permet de sauver un défi terminé si quelqu'un a oublié de check-in"""
+    """Permet de revenir dans un défi après avoir été éliminé pour oubli de check-in"""
     if not interaction.guild:
         await interaction.response.send_message("Commande serveur uniquement.", ephemeral=True)
         return
 
     guild_id = interaction.guild.id
     user_id = interaction.user.id
-
-    # Récupérer le dernier défi inactif de CE serveur
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT * FROM challenge WHERE guild_id = %s AND is_active = 0 ORDER BY id DESC LIMIT 1', (guild_id,))
-    challenge = c.fetchone()
-
-    if not challenge:
-        conn.close()
-        await interaction.response.send_message("Aucun défi terminé à sauver sur ce serveur.", ephemeral=True)
-        return
-
-    # Vérifier que l'utilisateur était participant
-    if user_id not in [challenge['user1_id'], challenge['user2_id']]:
-        conn.close()
-        await interaction.response.send_message("Tu ne participais pas à ce défi.", ephemeral=True)
-        return
+    user_name = interaction.user.display_name
 
     # Vérifier que c'est une image
     if not photo.content_type or not photo.content_type.startswith('image/'):
-        conn.close()
         await interaction.response.send_message("Image requise.", ephemeral=True)
         return
 
-    # Vérifier que le défi n'a pas été terminé il y a trop longtemps (max 24h)
-    c.execute('SELECT end_date FROM history WHERE challenge_id = %s ORDER BY id DESC LIMIT 1', (challenge['id'],))
+    conn = get_db()
+    c = conn.cursor()
+
+    # Chercher dans l'historique si cet utilisateur a été éliminé récemment sur ce serveur
+    c.execute('''
+        SELECT h.*, c.id as challenge_id, c.is_active
+        FROM history h
+        JOIN challenge c ON h.challenge_id = c.id
+        WHERE h.guild_id = %s AND h.loser_id = %s
+        ORDER BY h.id DESC LIMIT 1
+    ''', (guild_id, user_id))
     history_row = c.fetchone()
 
-    if history_row:
-        end_date = datetime.datetime.fromisoformat(history_row['end_date'])
-        now = datetime.datetime.now(PARIS_TZ)
-        if end_date.tzinfo is None:
-            end_date = end_date.replace(tzinfo=PARIS_TZ)
-        hours_since_end = (now - end_date).total_seconds() / 3600
+    if not history_row:
+        conn.close()
+        await interaction.response.send_message("Tu n'as pas été éliminé récemment sur ce serveur.", ephemeral=True)
+        return
 
-        if hours_since_end > 24:
-            conn.close()
-            await interaction.response.send_message(
-                f"Trop tard ! Le défi a été terminé il y a {int(hours_since_end)}h. Limite: 24h.",
-                ephemeral=True
-            )
-            return
+    # Vérifier que l'élimination n'est pas trop ancienne (max 24h)
+    end_date = datetime.datetime.fromisoformat(history_row['end_date'])
+    now = datetime.datetime.now(PARIS_TZ)
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=PARIS_TZ)
+    hours_since_end = (now - end_date).total_seconds() / 3600
+
+    if hours_since_end > 24:
+        conn.close()
+        await interaction.response.send_message(
+            f"Trop tard ! Tu as été éliminé il y a {int(hours_since_end)}h. Limite: 24h.",
+            ephemeral=True
+        )
+        return
+
+    challenge_id = history_row['challenge_id']
+    challenge_active = history_row['is_active']
+    gage = history_row['loser_gage']
+
+    # Vérifier si le défi est toujours actif (avec d'autres participants)
+    if not challenge_active:
+        # Le défi n'est plus actif, on ne peut pas rescue
+        conn.close()
+        await interaction.response.send_message(
+            "Le défi est complètement terminé (plus assez de participants). Impossible de rescue.",
+            ephemeral=True
+        )
+        return
 
     # Déterminer la semaine de l'échec
-    now = datetime.datetime.now(PARIS_TZ)
     yesterday = now - datetime.timedelta(days=1)
     iso = yesterday.isocalendar()
     week_number, year = iso[1], iso[0]
@@ -1886,59 +2094,56 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
         iso = last_sunday.isocalendar()
         week_number, year = iso[1], iso[0]
 
-    # Récupérer les profils pour les objectifs
-    profile1 = get_profile(challenge['user1_id'])
-    profile2 = get_profile(challenge['user2_id'])
+    # Récupérer le profil pour l'objectif
+    profile = get_profile(user_id)
+    goal = profile['weekly_goal'] if profile else 4
+    current_count = get_checkins_for_user_week(user_id, week_number, year)
 
-    user1_goal = profile1['weekly_goal'] if profile1 else 4
-    user2_goal = profile2['weekly_goal'] if profile2 else 4
+    # Avec le rescue, le count sera +1
+    new_count = current_count + 1
 
-    # Récupérer les check-ins ACTUELS
-    user1_count = get_checkins_for_user_week(challenge['user1_id'], week_number, year)
-    user2_count = get_checkins_for_user_week(challenge['user2_id'], week_number, year)
-
-    # Ajouter +1 pour le rescue
-    if user_id == challenge['user1_id']:
-        user1_count += 1
-    else:
-        user2_count += 1
-
-    # Vérifier le freeze
-    user1_frozen = challenge.get('freeze_user1', 0)
-    user2_frozen = challenge.get('freeze_user2', 0)
-
-    user1_ok = user1_count >= user1_goal or user1_frozen
-    user2_ok = user2_count >= user2_goal or user2_frozen
-
-    if user1_ok and user2_ok:
-        # Les deux passent ! Ajouter le check-in (global) et réactiver
+    if new_count >= goal:
+        # Rescue réussi ! Ajouter le check-in et réintégrer le participant
         rescue_timestamp = datetime.datetime.now().isoformat()
 
         c.execute('''
             INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note)
             VALUES (%s, %s, %s, %s, %s, %s)
-        ''', (user_id, rescue_timestamp, week_number, year, photo.url, "Rescue"))
+        ''', (user_id, rescue_timestamp, week_number, year, photo.url, "[RESCUE]"))
 
-        c.execute('UPDATE challenge SET is_active = 1 WHERE id = %s', (challenge['id'],))
-        c.execute('DELETE FROM history WHERE challenge_id = %s', (challenge['id'],))
+        # Ré-ajouter le participant au défi
+        c.execute('''
+            INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+            VALUES (%s, %s, %s, %s, 0, 0)
+        ''', (challenge_id, user_id, user_name, gage))
+
+        # Supprimer l'entrée de l'historique
+        c.execute('DELETE FROM history WHERE id = %s', (history_row['id'],))
 
         conn.commit()
         conn.close()
 
-        saved_name = challenge['user1_name'] if user_id == challenge['user1_id'] else challenge['user2_name']
+        # Récupérer les autres participants pour afficher
+        participants = get_challenge_participants(challenge_id)
 
         embed = discord.Embed(color=EMBED_COLOR)
-        embed.description = f"""▸ **DÉFI SAUVÉ !**
 
-**{saved_name}** a ajouté son check-in manquant.
+        participants_text = ""
+        for p in participants:
+            p_profile = get_profile(p['user_id'])
+            p_goal = p_profile['weekly_goal'] if p_profile else 4
+            p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
+            participants_text += f"{p['user_name'][:12]:12} ——— {p_count}/{p_goal} ✓\n"
+
+        embed.description = f"""▸ **RESCUE RÉUSSI !**
+
+**{user_name}** revient dans le défi !
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-◆ **NOUVEAU SCORE**
+◆ **PARTICIPANTS**
 ```
-{challenge['user1_name'][:12]:12} ——— {user1_count}/{user1_goal} {"✓" if user1_ok else "✗"}
-{challenge['user2_name'][:12]:12} ——— {user2_count}/{user2_goal} {"✓" if user2_ok else "✗"}
-```
+{participants_text}```
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1948,20 +2153,14 @@ Pas de gage cette fois. 😅"""
         embed.set_image(url=photo.url)
         embed.set_footer(text="◆ Challenge Bot • Rescue")
 
-        await interaction.response.send_message(
-            content=f"<@{challenge['user1_id']}> <@{challenge['user2_id']}>",
-            embed=embed
-        )
+        # Ping tous les participants
+        ping_ids = [p['user_id'] for p in participants]
+        ping_content = " ".join([f"<@{pid}>" for pid in ping_ids])
+
+        await interaction.response.send_message(content=ping_content, embed=embed)
 
     else:
         conn.close()
-
-        if user_id == challenge['user1_id']:
-            user_count = user1_count
-            user_goal = user1_goal
-        else:
-            user_count = user2_count
-            user_goal = user2_goal
 
         embed = discord.Embed(color=EMBED_COLOR)
         embed.description = f"""▸ **RESCUE IMPOSSIBLE**
@@ -1969,11 +2168,11 @@ Pas de gage cette fois. 😅"""
 Même avec ce check-in, l'objectif n'est pas atteint.
 
 ```
-Score avec rescue: {user_count}/{user_goal}
-Manquant: {user_goal - user_count}
+Score avec rescue: {new_count}/{goal}
+Manquant: {goal - new_count}
 ```
 
-Le défi reste terminé."""
+Tu restes éliminé du défi."""
 
         embed.set_footer(text="◆ Challenge Bot")
 
@@ -2030,22 +2229,10 @@ async def check_weekly_goals():
                 else:
                     continue
 
-            # Récupérer les profils pour les objectifs
-            profile1 = get_profile(challenge['user1_id'])
-            profile2 = get_profile(challenge['user2_id'])
-
-            user1_goal = profile1['weekly_goal'] if profile1 else 4
-            user2_goal = profile2['weekly_goal'] if profile2 else 4
-
-            user1_count = get_checkins_for_user_week(challenge['user1_id'], week_number, year)
-            user2_count = get_checkins_for_user_week(challenge['user2_id'], week_number, year)
-
-            # Vérifier le freeze
-            user1_frozen = challenge.get('freeze_user1', 0)
-            user2_frozen = challenge.get('freeze_user2', 0)
-
-            user1_failed = user1_count < user1_goal and not user1_frozen
-            user2_failed = user2_count < user2_goal and not user2_frozen
+            # Récupérer tous les participants
+            participants = get_challenge_participants(challenge['id'])
+            if not participants:
+                continue
 
             channel = bot.get_channel(challenge['channel_id'])
             if not channel:
@@ -2054,129 +2241,133 @@ async def check_weekly_goals():
             total_weeks = challenge.get('total_weeks', 0)
             challenge_week = get_challenge_week_number(challenge['start_date'])
 
-            if user1_failed or user2_failed:
-                c.execute('UPDATE challenge SET is_active = 0 WHERE id = %s', (challenge['id'],))
+            # Évaluer chaque participant
+            failed_participants = []
+            success_participants = []
 
+            for p in participants:
+                profile = get_profile(p['user_id'])
+                goal = profile['weekly_goal'] if profile else 4
+                count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                frozen = p.get('freeze', 0)
+
+                if count < goal and not frozen:
+                    failed_participants.append({
+                        'user_id': p['user_id'],
+                        'user_name': p['user_name'],
+                        'gage': p['gage'],
+                        'count': count,
+                        'goal': goal
+                    })
+                else:
+                    success_participants.append({
+                        'user_id': p['user_id'],
+                        'user_name': p['user_name'],
+                        'count': count,
+                        'goal': goal,
+                        'frozen': frozen
+                    })
+                    # Incrémenter le streak des participants qui ont réussi
+                    new_streak = p.get('streak', 0) + 1
+                    c.execute('UPDATE challenge_participants SET streak = %s WHERE id = %s', (new_streak, p['id']))
+
+            # Si des participants ont échoué
+            if failed_participants:
+                # Retirer les participants qui ont échoué
+                for fp in failed_participants:
+                    c.execute('DELETE FROM challenge_participants WHERE challenge_id = %s AND user_id = %s',
+                              (challenge['id'], fp['user_id']))
+
+                    # Enregistrer dans l'historique
+                    c.execute('''
+                        INSERT INTO history (challenge_id, guild_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
+                        VALUES (%s, %s, NULL, NULL, %s, %s, %s, %s, %s, %s)
+                    ''', (challenge['id'], challenge['guild_id'], fp['user_id'], fp['user_name'], fp['gage'], now.isoformat(), 'Objectif non atteint', total_weeks))
+
+                # Construire l'embed pour les échecs
                 embed = discord.Embed(color=EMBED_COLOR)
 
-                if user1_failed and user2_failed:
+                failed_text = ""
+                for fp in failed_participants:
+                    failed_text += f"""
+◆ **{fp['user_name'].upper()}** — ÉCHEC
+```
+{format_stat_line("SCORE", f"{fp['count']}/{fp['goal']}")}
+{format_stat_line("GAGE", fp['gage'][:20])}
+```
+"""
+
+                success_text = ""
+                for sp in success_participants:
+                    freeze_mark = " (freeze)" if sp.get('frozen') else " ✓"
+                    success_text += f"""
+◆ **{sp['user_name'].upper()}**{freeze_mark}
+```
+{format_stat_line("SCORE", f"{sp['count']}/{sp['goal']}")}
+```
+"""
+
+                # Vérifier combien de participants restent
+                remaining = len(success_participants)
+
+                if remaining < 2:
+                    # Pas assez de participants, fin du défi
+                    c.execute('UPDATE challenge SET is_active = 0 WHERE id = %s', (challenge['id'],))
+
                     embed.description = f"""▸ **GAME OVER**
 
-Les deux ont échoué.
-
+Échec(s) cette semaine :
+{failed_text}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-◆ **{challenge['user1_name'].upper()}** — ÉCHEC
-```
-{format_stat_line("SCORE", f"{user1_count}/{user1_goal}")}
-{format_stat_line("GAGE", challenge['user1_gage'][:20])}
-```
+{"Participant(s) restant(s) :" + success_text if success_text else ""}
 
-◆ **{challenge['user2_name'].upper()}** — ÉCHEC
-```
-{format_stat_line("SCORE", f"{user2_count}/{user2_goal}")}
-{format_stat_line("GAGE", challenge['user2_gage'][:20])}
-```
-
-▼ **Les deux doivent faire leur gage.**"""
-
-                    c.execute('''
-                        INSERT INTO history (challenge_id, guild_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
-                        VALUES (%s, %s, NULL, NULL, NULL, 'Les deux', %s, %s, 'Double échec', %s)
-                    ''', (challenge['id'], challenge['guild_id'], f"{challenge['user1_gage']} / {challenge['user2_gage']}", now.isoformat(), total_weeks))
-
-                elif user1_failed:
-                    embed.description = f"""▸ **GAME OVER**
-
-**{challenge['user1_name']}** a perdu.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-◆ **PERDANT**
-```
-{challenge['user1_name']}
-{format_stat_line("SCORE", f"{user1_count}/{user1_goal}")}
-```
-
-◆ **GAGNANT**
-```
-{challenge['user2_name']}
-{format_stat_line("SCORE", f"{user2_count}/{user2_goal}")}
-```
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-▼ **GAGE À FAIRE**
-{challenge['user1_gage']}"""
-
-                    c.execute('''
-                        INSERT INTO history (challenge_id, guild_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ''', (challenge['id'], challenge['guild_id'], challenge['user2_id'], challenge['user2_name'],
-                          challenge['user1_id'], challenge['user1_name'], challenge['user1_gage'], now.isoformat(), 'Objectif non atteint', total_weeks))
-
+▼ **Le défi est terminé** (moins de 2 participants)."""
                 else:
-                    embed.description = f"""▸ **GAME OVER**
+                    embed.description = f"""▸ **ÉLIMINATION**
 
-**{challenge['user2_name']}** a perdu.
-
+Échec(s) cette semaine :
+{failed_text}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-◆ **PERDANT**
-```
-{challenge['user2_name']}
-{format_stat_line("SCORE", f"{user2_count}/{user2_goal}")}
-```
+Toujours en course ({remaining} participants) :
+{success_text}
 
-◆ **GAGNANT**
-```
-{challenge['user1_name']}
-{format_stat_line("SCORE", f"{user1_count}/{user1_goal}")}
-```
+▼ **Le défi continue.**"""
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-▼ **GAGE À FAIRE**
-{challenge['user2_gage']}"""
-
-                    c.execute('''
-                        INSERT INTO history (challenge_id, guild_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ''', (challenge['id'], challenge['guild_id'], challenge['user1_id'], challenge['user1_name'],
-                          challenge['user2_id'], challenge['user2_name'], challenge['user2_gage'], now.isoformat(), 'Objectif non atteint', total_weeks))
+                    # Incrémenter total_weeks
+                    c.execute('UPDATE challenge SET total_weeks = %s, week_number = %s WHERE id = %s',
+                              (total_weeks + 1, week_number + 1, challenge['id']))
 
                 embed.set_footer(text=f"◆ Challenge Bot • Semaine {challenge_week}")
-                await channel.send(f"<@{challenge['user1_id']}> <@{challenge['user2_id']}>", embed=embed)
+
+                # Ping tous les participants (actuels et éliminés)
+                all_ids = [fp['user_id'] for fp in failed_participants] + [sp['user_id'] for sp in success_participants]
+                ping_content = " ".join([f"<@{uid}>" for uid in all_ids])
+                await channel.send(content=ping_content, embed=embed)
 
             else:
-                # Les deux ont réussi
-                new_streak1 = challenge.get('streak_user1', 0) + 1
-                new_streak2 = challenge.get('streak_user2', 0) + 1
-                new_total = total_weeks + 1
+                # Tout le monde a réussi !
+                c.execute('UPDATE challenge SET total_weeks = %s, week_number = %s WHERE id = %s',
+                          (total_weeks + 1, week_number + 1, challenge['id']))
 
-                c.execute('''
-                    UPDATE challenge
-                    SET streak_user1 = %s, streak_user2 = %s, total_weeks = %s, week_number = %s
-                    WHERE id = %s
-                ''', (new_streak1, new_streak2, new_total, week_number + 1, challenge['id']))
+                success_text = ""
+                for sp in success_participants:
+                    freeze_mark = " (freeze)" if sp.get('frozen') else " ✓"
+                    success_text += f"""
+◆ **{sp['user_name'].upper()}**{freeze_mark}
+```
+{format_stat_line("SCORE", f"{sp['count']}/{sp['goal']}")}
+```
+"""
 
                 embed = discord.Embed(color=EMBED_COLOR)
                 embed.description = f"""▸ **SEMAINE {challenge_week} VALIDÉE**
 
-Les deux ont réussi !
+Tout le monde a réussi !
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-◆ **{challenge['user1_name'].upper()}**
-```
-{format_stat_line("SCORE", f"{user1_count}/{user1_goal}")} ✓
-```
-
-◆ **{challenge['user2_name'].upper()}**
-```
-{format_stat_line("SCORE", f"{user2_count}/{user2_goal}")} ✓
-```
-
+{success_text}
 ▼ **Le défi continue.**"""
 
                 embed.set_footer(text=f"◆ Challenge Bot • Semaine {challenge_week + 1}")
@@ -2224,47 +2415,40 @@ async def send_reminders():
                 else:
                     continue
 
-            # Récupérer les profils pour les objectifs
-            profile1 = get_profile(challenge['user1_id'])
-            profile2 = get_profile(challenge['user2_id'])
-
-            user1_goal = profile1['weekly_goal'] if profile1 else 4
-            user2_goal = profile2['weekly_goal'] if profile2 else 4
-
-            user1_count = get_checkins_for_user_week(challenge['user1_id'], week_number, year)
-            user2_count = get_checkins_for_user_week(challenge['user2_id'], week_number, year)
+            participants = get_challenge_participants(challenge['id'])
+            if not participants:
+                continue
 
             channel = bot.get_channel(challenge['channel_id'])
             if not channel:
                 continue
 
-            # Vérifier le freeze
-            user1_frozen = challenge.get('freeze_user1', 0)
-            user2_frozen = challenge.get('freeze_user2', 0)
+            # Vérifier chaque participant
+            reminder_text = "▸ **RAPPEL**\n\n"
+            ping_content = ""
+            has_reminders = False
 
-            user1_remaining = max(0, user1_goal - user1_count) if not user1_frozen else 0
-            user2_remaining = max(0, user2_goal - user2_count) if not user2_frozen else 0
+            for p in participants:
+                profile = get_profile(p['user_id'])
+                goal = profile['weekly_goal'] if profile else 4
+                count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                frozen = p.get('freeze', 0)
 
-            if user1_remaining > 0 or user2_remaining > 0:
-                embed = discord.Embed(color=EMBED_COLOR)
+                remaining = max(0, goal - count) if not frozen else 0
 
-                reminder_text = "▸ **RAPPEL**\n\n"
-                ping_content = ""
+                if remaining > 0:
+                    reminder_text += f"<@{p['user_id']}> — **{remaining}** session(s) restante(s)\n"
+                    ping_content += f"<@{p['user_id']}> "
+                    has_reminders = True
 
-                if user1_remaining > 0:
-                    reminder_text += f"<@{challenge['user1_id']}> — **{user1_remaining}** session(s) restante(s)\n"
-                    ping_content += f"<@{challenge['user1_id']}> "
-
-                if user2_remaining > 0:
-                    reminder_text += f"<@{challenge['user2_id']}> — **{user2_remaining}** session(s) restante(s)\n"
-                    ping_content += f"<@{challenge['user2_id']}>"
-
+            if has_reminders:
                 reminder_text += f"\n**{hours_remaining}** heure(s) restante(s)."
 
+                embed = discord.Embed(color=EMBED_COLOR)
                 embed.description = reminder_text
                 embed.set_footer(text="◆ Challenge Bot")
 
-                await channel.send(content=ping_content, embed=embed)
+                await channel.send(content=ping_content.strip(), embed=embed)
 
         except Exception as e:
             print(f"Erreur send_reminders pour challenge {challenge.get('id')}: {e}")
