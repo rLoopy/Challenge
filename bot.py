@@ -908,6 +908,22 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
     # Construire l'embed principal
     note_text = f"\n📝 *{note}*" if note else ""
 
+    # Récupérer le défi du serveur actuel pour afficher tous les participants
+    current_guild_id = interaction.guild.id if interaction.guild else None
+    current_challenge = get_active_challenge_for_guild(current_guild_id) if current_guild_id else None
+
+    # Construire la progression de tous les participants du serveur actuel
+    progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+
+    if current_challenge:
+        participants = get_challenge_participants(current_challenge['id'])
+        for p in participants:
+            if p['user_id'] != user_id:
+                p_profile = get_profile(p['user_id'])
+                p_goal = p_profile['weekly_goal'] if p_profile else 4
+                p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
 
@@ -918,9 +934,9 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-◆ **CETTE SEMAINE**
+◆ **PROGRESSION**
 ```
-{progress_bar(user_count, user_goal)} {user_count}/{user_goal}
+{progression_text.strip()}
 ```
 
 ◆ **TEMPS RESTANT**
@@ -933,7 +949,6 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
     embed.set_footer(text=f"◆ Challenge Bot • {datetime.datetime.now().strftime('%H:%M')}")
 
     # Compter les autres serveurs où on doit cross-poster
-    current_guild_id = interaction.guild.id if interaction.guild else None
     other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
 
     # Ajouter le feedback cross-post prévu
@@ -1093,6 +1108,22 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     note_text = f"\n📝 *{note}*" if note else ""
     yesterday_str = yesterday.strftime('%d/%m')
 
+    # Récupérer le défi du serveur actuel pour afficher tous les participants
+    current_guild_id = interaction.guild.id if interaction.guild else None
+    current_challenge = get_active_challenge_for_guild(current_guild_id) if current_guild_id else None
+
+    # Construire la progression de tous les participants
+    progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+
+    if current_challenge:
+        participants = get_challenge_participants(current_challenge['id'])
+        for p in participants:
+            if p['user_id'] != user_id:
+                p_profile = get_profile(p['user_id'])
+                p_goal = p_profile['weekly_goal'] if p_profile else 4
+                p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}** (hier {yesterday_str})
 
@@ -1103,9 +1134,9 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-◆ **CETTE SEMAINE**
+◆ **PROGRESSION**
 ```
-{progress_bar(user_count, user_goal)} {user_count}/{user_goal}
+{progression_text.strip()}
 ```
 
 ◆ **TEMPS RESTANT**
@@ -1120,7 +1151,6 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     embed.set_footer(text=f"◆ Challenge Bot • Late check-in")
 
     # Compter les autres serveurs
-    current_guild_id = interaction.guild.id if interaction.guild else None
     other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
 
     if other_challenges:
@@ -1253,6 +1283,22 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
 
     note_text = f"\n📝 *{note}*" if note else ""
 
+    # Récupérer le défi du serveur actuel pour afficher tous les participants
+    current_guild_id = interaction.guild.id if interaction.guild else None
+    current_challenge = get_active_challenge_for_guild(current_guild_id) if current_guild_id else None
+
+    # Construire la progression de tous les participants
+    progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+
+    if current_challenge:
+        participants = get_challenge_participants(current_challenge['id'])
+        for p in participants:
+            if p['user_id'] != user_id:
+                p_profile = get_profile(p['user_id'])
+                p_goal = p_profile['weekly_goal'] if p_profile else 4
+                p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
 
@@ -1263,9 +1309,9 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-◆ **CETTE SEMAINE**
+◆ **PROGRESSION**
 ```
-{progress_bar(user_count, user_goal)} {user_count}/{user_goal}
+{progression_text.strip()}
 ```
 
 ◆ **TEMPS RESTANT**
@@ -1279,7 +1325,6 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
     embed.set_footer(text=f"◆ Challenge Bot • {datetime.datetime.now().strftime('%H:%M')}")
 
     # Compter les serveurs pour cross-post
-    current_guild_id = interaction.guild.id if interaction.guild else None
     other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
 
     if other_challenges:
