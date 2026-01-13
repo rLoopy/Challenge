@@ -2249,19 +2249,22 @@ async def send_reminders():
                 embed = discord.Embed(color=EMBED_COLOR)
 
                 reminder_text = "▸ **RAPPEL**\n\n"
+                ping_content = ""
 
                 if user1_remaining > 0:
                     reminder_text += f"<@{challenge['user1_id']}> — **{user1_remaining}** session(s) restante(s)\n"
+                    ping_content += f"<@{challenge['user1_id']}> "
 
                 if user2_remaining > 0:
                     reminder_text += f"<@{challenge['user2_id']}> — **{user2_remaining}** session(s) restante(s)\n"
+                    ping_content += f"<@{challenge['user2_id']}>"
 
                 reminder_text += f"\n**{hours_remaining}** heure(s) restante(s)."
 
                 embed.description = reminder_text
                 embed.set_footer(text="◆ Challenge Bot")
 
-                await channel.send(embed=embed)
+                await channel.send(content=ping_content, embed=embed)
 
         except Exception as e:
             print(f"Erreur send_reminders pour challenge {challenge.get('id')}: {e}")
