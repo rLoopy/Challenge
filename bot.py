@@ -917,6 +917,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
 
     # Construire la progression de tous les participants du serveur actuel
     progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+    ping_ids = []
 
     if current_challenge:
         participants = get_challenge_participants(current_challenge['id'])
@@ -926,6 +927,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
                 p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
                 progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+                ping_ids.append(p['user_id'])
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
@@ -959,7 +961,8 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
 
     # Répondre à l'interaction originale (on doit répondre dans les 3 secondes)
-    await interaction.response.send_message(embed=embed)
+    ping_content = " ".join([f"<@{pid}>" for pid in ping_ids]) if ping_ids else None
+    await interaction.response.send_message(content=ping_content, embed=embed)
 
     # Cross-poster sur les autres serveurs (après avoir répondu)
     cross_post_success = 0
@@ -1117,6 +1120,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
 
     # Construire la progression de tous les participants
     progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+    ping_ids = []
 
     if current_challenge:
         participants = get_challenge_participants(current_challenge['id'])
@@ -1126,6 +1130,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
                 p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
                 progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+                ping_ids.append(p['user_id'])
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}** (hier {yesterday_str})
@@ -1159,7 +1164,8 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
 
-    await interaction.response.send_message(embed=embed)
+    ping_content = " ".join([f"<@{pid}>" for pid in ping_ids]) if ping_ids else None
+    await interaction.response.send_message(content=ping_content, embed=embed)
 
     # Cross-poster sur les autres serveurs
     cross_post_success = 0
@@ -1174,14 +1180,14 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             others = [p for p in participants if p['user_id'] != user_id]
 
             progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
-            ping_ids = []
+            cross_ping_ids = []
 
             for other in others:
                 other_profile = get_profile(other['user_id'])
                 other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
-                ping_ids.append(other['user_id'])
+                cross_ping_ids.append(other['user_id'])
 
             cross_embed = discord.Embed(color=EMBED_COLOR)
             cross_embed.description = f"""{status_emoji} **CHECK-IN** (hier)
@@ -1203,8 +1209,8 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             cross_embed.set_footer(text=f"◆ Challenge Bot • Cross-post")
 
             try:
-                ping_content = " ".join([f"<@{pid}>" for pid in ping_ids])
-                await channel.send(content=ping_content, embed=cross_embed)
+                cross_ping_content = " ".join([f"<@{pid}>" for pid in cross_ping_ids])
+                await channel.send(content=cross_ping_content, embed=cross_embed)
                 cross_post_success += 1
             except:
                 cross_post_fail += 1
@@ -1292,6 +1298,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
 
     # Construire la progression de tous les participants
     progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+    ping_ids = []
 
     if current_challenge:
         participants = get_challenge_participants(current_challenge['id'])
@@ -1301,6 +1308,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
                 p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
                 progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+                ping_ids.append(p['user_id'])
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
@@ -1333,7 +1341,9 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
 
-    await interaction.response.send_message(content=f"{membre.mention}", embed=embed)
+    # Ping le membre + les autres participants
+    ping_content = f"{membre.mention} " + " ".join([f"<@{pid}>" for pid in ping_ids])
+    await interaction.response.send_message(content=ping_content.strip(), embed=embed)
 
     # Cross-poster sur les autres serveurs
     cross_post_success = 0
