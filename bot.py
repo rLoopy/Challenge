@@ -11,6 +11,7 @@ import os
 from typing import Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from migrate import run_migrations
 
 # Fuseau horaire français
 PARIS_TZ = ZoneInfo("Europe/Paris")
@@ -402,6 +403,7 @@ def get_checkins_for_challenge_week(challenge_id, week_number, year):
 @bot.event
 async def on_ready():
     print(f"Bot connecté: {bot.user}")
+    run_migrations()
     init_db()
     try:
         synced = await bot.tree.sync()
