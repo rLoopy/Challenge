@@ -132,7 +132,7 @@ def init_db():
             user_id BIGINT NOT NULL,
             user_name TEXT NOT NULL,
             gage TEXT NOT NULL,
-            freeze INTEGER DEFAULT 0,
+            is_frozen INTEGER DEFAULT 0,
             streak INTEGER DEFAULT 0
         )
     ''')
@@ -194,7 +194,7 @@ def init_db():
             -- Vérifier si la migration est nécessaire (anciennes colonnes existent)
             IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='challenge' AND column_name='user1_id') THEN
                 -- Migrer user1 pour tous les challenges qui n'ont pas encore de participants
-                INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+                INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, is_frozen, streak)
                 SELECT c.id, c.user1_id, c.user1_name, COALESCE(c.user1_gage, 'Gage non défini'),
                        COALESCE(c.freeze_user1, 0), COALESCE(c.streak_user1, 0)
                 FROM challenge c
@@ -205,7 +205,7 @@ def init_db():
                 );
 
                 -- Migrer user2 pour tous les challenges qui n'ont pas encore de participants
-                INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+                INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, is_frozen, streak)
                 SELECT c.id, c.user2_id, c.user2_name, COALESCE(c.user2_gage, 'Gage non défini'),
                        COALESCE(c.freeze_user2, 0), COALESCE(c.streak_user2, 0)
                 FROM challenge c
@@ -340,7 +340,7 @@ def add_participant(challenge_id, user_id, user_name, gage):
     conn = get_db()
     c = conn.cursor()
     c.execute('''
-        INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+        INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, is_frozen, streak)
         VALUES (%s, %s, %s, %s, 0, 0)
     ''', (challenge_id, user_id, user_name, gage))
     conn.commit()
@@ -538,7 +538,7 @@ async def challenges_cmd(interaction: discord.Interaction):
         others = [p for p in participants if p['user_id'] != user_id]
 
         my_gage = my_participant['gage'] if my_participant else "?"
-        is_frozen = my_participant.get('freeze', 0) if my_participant else 0
+        is_frozen = my_participant.get('is_frozen', 0) if my_participant else 0
 
         # Trouver le nom du serveur
         guild = bot.get_guild(challenge['guild_id'])
@@ -554,7 +554,7 @@ async def challenges_cmd(interaction: discord.Interaction):
             other_profile = get_profile(other['user_id'])
             other_goal = other_profile['weekly_goal'] if other_profile else 4
             other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
-            freeze_mark = "❄" if other.get('freeze', 0) else ""
+            freeze_mark = "❄" if other.get('is_frozen', 0) else ""
             others_text += f"{other['user_name'][:8]}: {other_count}/{other_goal}{freeze_mark} "
 
         challenges_text += f"""
@@ -646,12 +646,12 @@ async def setup(
 
     # Ajouter les participants
     c.execute('''
-        INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+        INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, is_frozen, streak)
         VALUES (%s, %s, %s, %s, 0, 0)
     ''', (challenge_id, user_id, interaction.user.display_name, ton_gage))
 
     c.execute('''
-        INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+        INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, is_frozen, streak)
         VALUES (%s, %s, %s, %s, 0, 0)
     ''', (challenge_id, adversaire.id, adversaire.display_name, son_gage))
 
@@ -1447,7 +1447,7 @@ async def stats(interaction: discord.Interaction):
         activity = profile['activity'] if profile else 'Sport'
         count = get_checkins_for_user_week(p['user_id'], week_number, year)
         total = get_total_checkins_user(p['user_id'])
-        frozen = p.get('freeze', 0)
+        frozen = p.get('is_frozen', 0)
 
         pct = count / goal if goal > 0 else 0
         validated = count >= goal or frozen
@@ -1891,13 +1891,13 @@ async def freeze_cmd(interaction: discord.Interaction, raison: str = "Non spéci
         await interaction.response.send_message("Tu ne participes pas.", ephemeral=True)
         return
 
-    if participant.get('freeze', 0):
+    if participant.get('is_frozen', 0):
         await interaction.response.send_message("Tu es déjà en freeze.", ephemeral=True)
         return
 
     conn = get_db()
     c = conn.cursor()
-    c.execute('UPDATE challenge_participants SET freeze = 1 WHERE challenge_id = %s AND user_id = %s',
+    c.execute('UPDATE challenge_participants SET is_frozen = 1 WHERE challenge_id = %s AND user_id = %s',
               (challenge['id'], user_id))
     conn.commit()
     conn.close()
@@ -1947,13 +1947,13 @@ async def unfreeze_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("Tu ne participes pas.", ephemeral=True)
         return
 
-    if not participant.get('freeze', 0):
+    if not participant.get('is_frozen', 0):
         await interaction.response.send_message("Tu n'es pas en freeze.", ephemeral=True)
         return
 
     conn = get_db()
     c = conn.cursor()
-    c.execute('UPDATE challenge_participants SET freeze = 0 WHERE challenge_id = %s AND user_id = %s',
+    c.execute('UPDATE challenge_participants SET is_frozen = 0 WHERE challenge_id = %s AND user_id = %s',
               (challenge['id'], user_id))
     conn.commit()
     conn.close()
@@ -1985,8 +1985,8 @@ async def freezeall_cmd(interaction: discord.Interaction, raison: str = "Non sp�
     frozen_count = 0
     for challenge in challenges:
         participant = get_participant(challenge['id'], user_id)
-        if participant and not participant.get('freeze', 0):
-            c.execute('UPDATE challenge_participants SET freeze = 1 WHERE challenge_id = %s AND user_id = %s',
+        if participant and not participant.get('is_frozen', 0):
+            c.execute('UPDATE challenge_participants SET is_frozen = 1 WHERE challenge_id = %s AND user_id = %s',
                       (challenge['id'], user_id))
             frozen_count += 1
 
@@ -2034,8 +2034,8 @@ async def unfreezeall_cmd(interaction: discord.Interaction):
     unfrozen_count = 0
     for challenge in challenges:
         participant = get_participant(challenge['id'], user_id)
-        if participant and participant.get('freeze', 0):
-            c.execute('UPDATE challenge_participants SET freeze = 0 WHERE challenge_id = %s AND user_id = %s',
+        if participant and participant.get('is_frozen', 0):
+            c.execute('UPDATE challenge_participants SET is_frozen = 0 WHERE challenge_id = %s AND user_id = %s',
                       (challenge['id'], user_id))
             unfrozen_count += 1
 
@@ -2145,7 +2145,7 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
 
         # Ré-ajouter le participant au défi
         c.execute('''
-            INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, freeze, streak)
+            INSERT INTO challenge_participants (challenge_id, user_id, user_name, gage, is_frozen, streak)
             VALUES (%s, %s, %s, %s, 0, 0)
         ''', (challenge_id, user_id, user_name, gage))
 
@@ -2281,7 +2281,7 @@ async def check_weekly_goals():
                 profile = get_profile(p['user_id'])
                 goal = profile['weekly_goal'] if profile else 4
                 count = get_checkins_for_user_week(p['user_id'], week_number, year)
-                frozen = p.get('freeze', 0)
+                frozen = p.get('is_frozen', 0)
 
                 if count < goal and not frozen:
                     failed_participants.append({
@@ -2464,7 +2464,7 @@ async def send_reminders():
                 profile = get_profile(p['user_id'])
                 goal = profile['weekly_goal'] if profile else 4
                 count = get_checkins_for_user_week(p['user_id'], week_number, year)
-                frozen = p.get('freeze', 0)
+                frozen = p.get('is_frozen', 0)
 
                 remaining = max(0, goal - count) if not frozen else 0
 

@@ -78,7 +78,7 @@ def run_migrations():
             user_id BIGINT NOT NULL,
             user_name TEXT NOT NULL,
             gage TEXT NOT NULL,
-            freeze INTEGER DEFAULT 0,
+            is_frozen INTEGER DEFAULT 0,
             streak INTEGER DEFAULT 0
         )
     ''')
