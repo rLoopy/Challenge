@@ -534,8 +534,8 @@ async def challenges_cmd(interaction: discord.Interaction):
     challenges_text = ""
     for challenge in challenges:
         participants = get_challenge_participants(challenge['id'])
-        my_participant = next((p for p in participants if p['user_id'] == user_id), None)
-        others = [p for p in participants if p['user_id'] != user_id]
+        my_participant = next((p for p in participants if int(p['user_id']) == user_id), None)
+        others = [p for p in participants if int(p['user_id']) != user_id]
 
         my_gage = my_participant['gage'] if my_participant else "?"
         is_frozen = my_participant.get('is_frozen', 0) if my_participant else 0
@@ -551,9 +551,10 @@ async def challenges_cmd(interaction: discord.Interaction):
         # Construire la liste des autres
         others_text = ""
         for other in others:
-            other_profile = get_profile(other['user_id'])
+            other_user_id = int(other['user_id'])
+            other_profile = get_profile(other_user_id)
             other_goal = other_profile['weekly_goal'] if other_profile else 4
-            other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
+            other_count = get_checkins_for_user_week(other_user_id, week_number, year)
             freeze_mark = "❄" if other.get('is_frozen', 0) else ""
             others_text += f"{other['user_name'][:8]}: {other_count}/{other_goal}{freeze_mark} "
 
@@ -922,12 +923,13 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
     if current_challenge:
         participants = get_challenge_participants(current_challenge['id'])
         for p in participants:
-            if p['user_id'] != user_id:
-                p_profile = get_profile(p['user_id'])
+            p_user_id = int(p['user_id'])
+            if p_user_id != user_id:
+                p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                p_count = get_checkins_for_user_week(p_user_id, week_number, year)
                 progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
-                ping_ids.append(p['user_id'])
+                ping_ids.append(p_user_id)
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
@@ -976,18 +978,19 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
         if channel:
             # Récupérer tous les participants
             participants = get_challenge_participants(challenge['id'])
-            others = [p for p in participants if p['user_id'] != user_id]
+            others = [p for p in participants if int(p['user_id']) != user_id]
 
             # Construire la progression de tous les participants
             progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
             ping_ids = []
 
             for other in others:
-                other_profile = get_profile(other['user_id'])
-                other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
+                other_user_id = int(other['user_id'])
+                other_profile = get_profile(other_user_id)
+                other_count = get_checkins_for_user_week(other_user_id, week_number, year)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
-                ping_ids.append(other['user_id'])
+                ping_ids.append(other_user_id)
 
             # Embed pour ce serveur avec progression de tous
             cross_embed = discord.Embed(color=EMBED_COLOR)
@@ -1125,12 +1128,13 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     if current_challenge:
         participants = get_challenge_participants(current_challenge['id'])
         for p in participants:
-            if p['user_id'] != user_id:
-                p_profile = get_profile(p['user_id'])
+            p_user_id = int(p['user_id'])
+            if p_user_id != user_id:
+                p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                p_count = get_checkins_for_user_week(p_user_id, week_number, year)
                 progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
-                ping_ids.append(p['user_id'])
+                ping_ids.append(p_user_id)
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}** (hier {yesterday_str})
@@ -1177,17 +1181,18 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
 
         if channel:
             participants = get_challenge_participants(challenge['id'])
-            others = [p for p in participants if p['user_id'] != user_id]
+            others = [p for p in participants if int(p['user_id']) != user_id]
 
             progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
             cross_ping_ids = []
 
             for other in others:
-                other_profile = get_profile(other['user_id'])
-                other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
+                other_user_id = int(other['user_id'])
+                other_profile = get_profile(other_user_id)
+                other_count = get_checkins_for_user_week(other_user_id, week_number, year)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
-                cross_ping_ids.append(other['user_id'])
+                cross_ping_ids.append(other_user_id)
 
             cross_embed = discord.Embed(color=EMBED_COLOR)
             cross_embed.description = f"""{status_emoji} **CHECK-IN** (hier)
@@ -1303,12 +1308,13 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
     if current_challenge:
         participants = get_challenge_participants(current_challenge['id'])
         for p in participants:
-            if p['user_id'] != user_id:
-                p_profile = get_profile(p['user_id'])
+            p_user_id = int(p['user_id'])
+            if p_user_id != user_id:
+                p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                p_count = get_checkins_for_user_week(p_user_id, week_number, year)
                 progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
-                ping_ids.append(p['user_id'])
+                ping_ids.append(p_user_id)
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
@@ -1355,17 +1361,18 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
 
         if channel:
             participants = get_challenge_participants(challenge['id'])
-            others = [p for p in participants if p['user_id'] != user_id]
+            others = [p for p in participants if int(p['user_id']) != user_id]
 
             progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
             ping_ids = []
 
             for other in others:
-                other_profile = get_profile(other['user_id'])
-                other_count = get_checkins_for_user_week(other['user_id'], week_number, year)
+                other_user_id = int(other['user_id'])
+                other_profile = get_profile(other_user_id)
+                other_count = get_checkins_for_user_week(other_user_id, week_number, year)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
-                ping_ids.append(other['user_id'])
+                ping_ids.append(other_user_id)
 
             cross_embed = discord.Embed(color=EMBED_COLOR)
             cross_embed.description = f"""{status_emoji} **CHECK-IN**
