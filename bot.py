@@ -928,7 +928,11 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
                 p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
                 p_count = get_checkins_for_user_week(p_user_id, week_number, year)
-                progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+                p_frozen = p.get('is_frozen', 0)
+                if p_frozen:
+                    progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
+                else:
+                    progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
                 ping_ids.append(p_user_id)
 
     embed = discord.Embed(color=EMBED_COLOR)
@@ -989,7 +993,11 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
                 other_profile = get_profile(other_user_id)
                 other_count = get_checkins_for_user_week(other_user_id, week_number, year)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
-                progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
+                other_frozen = other.get('is_frozen', 0)
+                if other_frozen:
+                    progression_text += f"{other['user_name'][:10]:10} ❄️ FREEZE\n"
+                else:
+                    progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
                 ping_ids.append(other_user_id)
 
             # Embed pour ce serveur avec progression de tous
@@ -1133,7 +1141,11 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
                 p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
                 p_count = get_checkins_for_user_week(p_user_id, week_number, year)
-                progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+                p_frozen = p.get('is_frozen', 0)
+                if p_frozen:
+                    progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
+                else:
+                    progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
                 ping_ids.append(p_user_id)
 
     embed = discord.Embed(color=EMBED_COLOR)
@@ -1191,7 +1203,11 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
                 other_profile = get_profile(other_user_id)
                 other_count = get_checkins_for_user_week(other_user_id, week_number, year)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
-                progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
+                other_frozen = other.get('is_frozen', 0)
+                if other_frozen:
+                    progression_text += f"{other['user_name'][:10]:10} ❄️ FREEZE\n"
+                else:
+                    progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
                 cross_ping_ids.append(other_user_id)
 
             cross_embed = discord.Embed(color=EMBED_COLOR)
@@ -1313,7 +1329,11 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
                 p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
                 p_count = get_checkins_for_user_week(p_user_id, week_number, year)
-                progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+                p_frozen = p.get('is_frozen', 0)
+                if p_frozen:
+                    progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
+                else:
+                    progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
                 ping_ids.append(p_user_id)
 
     embed = discord.Embed(color=EMBED_COLOR)
@@ -1371,7 +1391,11 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
                 other_profile = get_profile(other_user_id)
                 other_count = get_checkins_for_user_week(other_user_id, week_number, year)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
-                progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
+                other_frozen = other.get('is_frozen', 0)
+                if other_frozen:
+                    progression_text += f"{other['user_name'][:10]:10} ❄️ FREEZE\n"
+                else:
+                    progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
                 ping_ids.append(other_user_id)
 
             cross_embed = discord.Embed(color=EMBED_COLOR)
