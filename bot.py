@@ -877,6 +877,9 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
         await interaction.response.send_message("Image requise.", ephemeral=True)
         return
 
+    # Defer pour éviter le timeout de 3 secondes
+    await interaction.response.defer()
+
     # Récupérer le profil
     profile = get_or_create_profile(user_id, user_name)
 
@@ -966,9 +969,9 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
 
-    # Répondre à l'interaction originale (on doit répondre dans les 3 secondes)
+    # Répondre à l'interaction (après defer)
     ping_content = " ".join([f"<@{pid}>" for pid in ping_ids]) if ping_ids else None
-    await interaction.response.send_message(content=ping_content, embed=embed)
+    await interaction.followup.send(content=ping_content, embed=embed)
 
     # Cross-poster sur les autres serveurs (après avoir répondu)
     cross_post_success = 0
@@ -1086,6 +1089,9 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
         )
         return
 
+    # Defer pour éviter le timeout
+    await interaction.response.defer()
+
     # Récupérer le profil
     profile = get_or_create_profile(user_id, user_name)
 
@@ -1181,7 +1187,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
 
     ping_content = " ".join([f"<@{pid}>" for pid in ping_ids]) if ping_ids else None
-    await interaction.response.send_message(content=ping_content, embed=embed)
+    await interaction.followup.send(content=ping_content, embed=embed)
 
     # Cross-poster sur les autres serveurs
     cross_post_success = 0
@@ -1277,6 +1283,9 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
         await interaction.response.send_message(f"{membre.mention} n'a pas de défi actif.", ephemeral=True)
         return
 
+    # Defer pour éviter le timeout
+    await interaction.response.defer()
+
     # Récupérer le profil
     profile = get_or_create_profile(user_id, user_name)
 
@@ -1369,7 +1378,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
 
     # Ping le membre + les autres participants
     ping_content = f"{membre.mention} " + " ".join([f"<@{pid}>" for pid in ping_ids])
-    await interaction.response.send_message(content=ping_content.strip(), embed=embed)
+    await interaction.followup.send(content=ping_content.strip(), embed=embed)
 
     # Cross-poster sur les autres serveurs
     cross_post_success = 0
@@ -1445,6 +1454,78 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
             await interaction.edit_original_response(embed=embed)
         except:
             pass
+
+
+@bot.tree.command(name="deletecheckin", description="Supprimer un check-in en double")
+@app_commands.describe(
+    checkin_id="ID du check-in à supprimer (voir /mycheckins)"
+)
+async def deletecheckin(interaction: discord.Interaction, checkin_id: int):
+    user_id = interaction.user.id
+    
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Vérifier que le check-in existe et appartient à l'utilisateur
+    c.execute('SELECT id, timestamp, note FROM checkins WHERE id = %s AND user_id = %s', (checkin_id, user_id))
+    checkin = c.fetchone()
+    
+    if not checkin:
+        conn.close()
+        await interaction.response.send_message(
+            f"❌ Check-in #{checkin_id} introuvable ou ne t'appartient pas.\nUtilise `/mycheckins` pour voir tes check-ins.",
+            ephemeral=True
+        )
+        return
+    
+    # Supprimer le check-in
+    c.execute('DELETE FROM checkins WHERE id = %s', (checkin_id,))
+    conn.commit()
+    conn.close()
+    
+    timestamp = checkin['timestamp'][:10] if checkin['timestamp'] else "?"
+    note = checkin['note'] or ""
+    
+    await interaction.response.send_message(
+        f"✅ Check-in #{checkin_id} supprimé ({timestamp} {note})",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="mycheckins", description="Voir mes check-ins de la semaine")
+async def mycheckins(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    week_number, year = get_week_info()
+    
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        SELECT id, timestamp, note 
+        FROM checkins 
+        WHERE user_id = %s AND week_number = %s AND year = %s
+        ORDER BY timestamp DESC
+    ''', (user_id, week_number, year))
+    checkins = c.fetchall()
+    conn.close()
+    
+    if not checkins:
+        await interaction.response.send_message("Aucun check-in cette semaine.", ephemeral=True)
+        return
+    
+    lines = []
+    for ci in checkins:
+        ts = ci['timestamp'][:16].replace('T', ' ') if ci['timestamp'] else "?"
+        note = f" - {ci['note']}" if ci['note'] else ""
+        lines.append(f"**#{ci['id']}** | {ts}{note}")
+    
+    embed = discord.Embed(
+        title=f"📋 Mes check-ins (Semaine {week_number})",
+        description="\n".join(lines),
+        color=EMBED_COLOR
+    )
+    embed.set_footer(text="Pour supprimer: /deletecheckin <id>")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="stats", description="Voir les statistiques du défi")
@@ -1727,20 +1808,22 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 
 ◆ **DÉFI** (par serveur)
 ```
-/setup      — Créer un défi
-/addplayer  — Ajouter un joueur
+/setup       — Créer un défi
+/addplayer   — Ajouter un joueur
 /removeplayer— Retirer un joueur
-/setchannel — Salon des check-ins
-/checkin    — Session + photo
-/latecheckin— Session d'HIER
-/checkinfor — Session pour qqn d'autre
-/stats      — Progression du défi
-/freeze     — Pause (ce serveur)
-/unfreeze   — Reprendre
-/freezeall  — Pause TOUS les défis
-/unfreezeall— Reprendre tous
-/rescue     — Revenir après élimination
-/cancel     — Annuler le défi
+/setchannel  — Salon des check-ins
+/checkin     — Session + photo
+/latecheckin — Session d'HIER
+/checkinfor  — Session pour qqn d'autre
+/mycheckins  — Voir mes check-ins
+/deletecheckin— Supprimer un doublon
+/stats       — Progression du défi
+/freeze      — Pause (ce serveur)
+/unfreeze    — Reprendre
+/freezeall   — Pause TOUS les défis
+/unfreezeall — Reprendre tous
+/rescue      — Revenir après élimination
+/cancel      — Annuler le défi
 ```
 
 ◆ **RÈGLES**
