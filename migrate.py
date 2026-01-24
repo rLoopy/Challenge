@@ -83,6 +83,12 @@ def run_migrations():
         )
     ''')
 
+    # Migration 002: Ajouter colonne session_type à checkins (gym par défaut)
+    apply_migration('002_add_session_type', '''
+        ALTER TABLE checkins
+        ADD COLUMN IF NOT EXISTS session_type TEXT DEFAULT 'gym'
+    ''')
+
     print("=== Migrations terminées ===\n")
 
 if __name__ == '__main__':

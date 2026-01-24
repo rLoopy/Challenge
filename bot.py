@@ -367,14 +367,25 @@ def get_user_active_challenges(user_id):
     conn.close()
     return rows
 
-def get_checkins_for_user_week(user_id, week_number, year):
-    """Récupère le nombre de check-ins d'un utilisateur pour une semaine"""
+def get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False):
+    """Récupère le nombre de check-ins d'un utilisateur pour une semaine
+    
+    Args:
+        count_gym_only: Si True, compte uniquement les sessions gym (pas cardio)
+    """
     conn = get_db()
     c = conn.cursor()
-    c.execute('''
-        SELECT COUNT(*) as count FROM checkins
-        WHERE user_id = %s AND week_number = %s AND year = %s
-    ''', (user_id, week_number, year))
+    if count_gym_only:
+        c.execute('''
+            SELECT COUNT(*) as count FROM checkins
+            WHERE user_id = %s AND week_number = %s AND year = %s
+            AND (session_type = 'gym' OR session_type IS NULL)
+        ''', (user_id, week_number, year))
+    else:
+        c.execute('''
+            SELECT COUNT(*) as count FROM checkins
+            WHERE user_id = %s AND week_number = %s AND year = %s
+        ''', (user_id, week_number, year))
     result = c.fetchone()['count']
     conn.close()
     return result
@@ -478,7 +489,7 @@ async def profile_cmd(
     # Statistiques
     total_checkins = get_total_checkins_user(user_id)
     week_number, year = get_week_info()
-    week_checkins = get_checkins_for_user_week(user_id, week_number, year)
+    week_checkins = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
     active_challenges = get_user_active_challenges(user_id)
 
     # Afficher pending_goal si défini
@@ -529,7 +540,7 @@ async def challenges_cmd(interaction: discord.Interaction):
     week_number, year = get_week_info()
     profile = get_profile(user_id)
     user_goal = profile['weekly_goal'] if profile else 4
-    user_count = get_checkins_for_user_week(user_id, week_number, year)
+    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
 
     challenges_text = ""
     for challenge in challenges:
@@ -554,7 +565,7 @@ async def challenges_cmd(interaction: discord.Interaction):
             other_user_id = int(other['user_id'])
             other_profile = get_profile(other_user_id)
             other_goal = other_profile['weekly_goal'] if other_profile else 4
-            other_count = get_checkins_for_user_week(other_user_id, week_number, year)
+            other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=True)
             freeze_mark = "❄" if other.get('is_frozen', 0) else ""
             others_text += f"{other['user_name'][:8]}: {other_count}/{other_goal}{freeze_mark} "
 
@@ -860,9 +871,14 @@ async def removeplayer_cmd(interaction: discord.Interaction, joueur: discord.Mem
 @bot.tree.command(name="checkin", description="Enregistrer une session")
 @app_commands.describe(
     photo="Photo de ta session",
-    note="Note optionnelle (ex: Push day, Cardio...)"
+    type="Type de session (Gym par défaut)",
+    note="Note optionnelle (ex: Push day, Course 5km...)"
 )
-async def checkin(interaction: discord.Interaction, photo: discord.Attachment, note: Optional[str] = None):
+@app_commands.choices(type=[
+    app_commands.Choice(name="🏋️ Gym", value="gym"),
+    app_commands.Choice(name="🏃 Cardio", value="cardio")
+])
+async def checkin(interaction: discord.Interaction, photo: discord.Attachment, type: Optional[str] = "gym", note: Optional[str] = None):
     user_id = interaction.user.id
     user_name = interaction.user.display_name
 
@@ -890,16 +906,18 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
     week_number, year = get_week_info()
     timestamp = datetime.datetime.now().isoformat()
 
+    session_type = type or "gym"
+    
     c.execute('''
-        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    ''', (user_id, timestamp, week_number, year, photo.url, note))
+        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ''', (user_id, timestamp, week_number, year, photo.url, note, session_type))
 
     conn.commit()
     conn.close()
 
-    # Compter les check-ins de la semaine
-    user_count = get_checkins_for_user_week(user_id, week_number, year)
+    # Compter les check-ins de la semaine (gym uniquement pour l'objectif)
+    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
     user_goal = profile['weekly_goal']
     user_activity = profile['activity']
     days = get_days_remaining()
@@ -930,7 +948,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
             if p_user_id != user_id:
                 p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p_user_id, week_number, year)
+                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=True)
                 p_frozen = p.get('is_frozen', 0)
                 if p_frozen:
                     progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
@@ -994,7 +1012,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
             for other in others:
                 other_user_id = int(other['user_id'])
                 other_profile = get_profile(other_user_id)
-                other_count = get_checkins_for_user_week(other_user_id, week_number, year)
+                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=True)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 other_frozen = other.get('is_frozen', 0)
                 if other_frozen:
@@ -1057,9 +1075,14 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, n
 @bot.tree.command(name="latecheckin", description="Enregistrer une session d'hier")
 @app_commands.describe(
     photo="Photo de ta session",
+    type="Type de session (Gym par défaut)",
     note="Note optionnelle"
 )
-async def latecheckin(interaction: discord.Interaction, photo: discord.Attachment, note: Optional[str] = None):
+@app_commands.choices(type=[
+    app_commands.Choice(name="🏋️ Gym", value="gym"),
+    app_commands.Choice(name="🏃 Cardio", value="cardio")
+])
+async def latecheckin(interaction: discord.Interaction, photo: discord.Attachment, type: Optional[str] = "gym", note: Optional[str] = None):
     user_id = interaction.user.id
     user_name = interaction.user.display_name
 
@@ -1104,17 +1127,18 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     timestamp = yesterday.replace(hour=20, minute=0, second=0).isoformat()  # 20h hier
 
     late_note = f"[HIER] {note}" if note else "[HIER]"
+    session_type = type or "gym"
 
     c.execute('''
-        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    ''', (user_id, timestamp, week_number, year, photo.url, late_note))
+        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ''', (user_id, timestamp, week_number, year, photo.url, late_note, session_type))
 
     conn.commit()
     conn.close()
 
-    # Compter les check-ins de la semaine
-    user_count = get_checkins_for_user_week(user_id, week_number, year)
+    # Compter les check-ins de la semaine (gym uniquement pour l'objectif)
+    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
     user_goal = profile['weekly_goal']
     user_activity = profile['activity']
     days = get_days_remaining()
@@ -1146,7 +1170,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             if p_user_id != user_id:
                 p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p_user_id, week_number, year)
+                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=True)
                 p_frozen = p.get('is_frozen', 0)
                 if p_frozen:
                     progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
@@ -1207,7 +1231,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             for other in others:
                 other_user_id = int(other['user_id'])
                 other_profile = get_profile(other_user_id)
-                other_count = get_checkins_for_user_week(other_user_id, week_number, year)
+                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=True)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 other_frozen = other.get('is_frozen', 0)
                 if other_frozen:
@@ -1269,9 +1293,14 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
 @bot.tree.command(name="checkinfor", description="Enregistrer une session pour quelqu'un d'autre")
 @app_commands.describe(
     membre="La personne pour qui enregistrer",
+    type="Type de session (Gym par défaut)",
     note="Note optionnelle"
 )
-async def checkinfor(interaction: discord.Interaction, membre: discord.Member, note: Optional[str] = None):
+@app_commands.choices(type=[
+    app_commands.Choice(name="🏋️ Gym", value="gym"),
+    app_commands.Choice(name="🏃 Cardio", value="cardio")
+])
+async def checkinfor(interaction: discord.Interaction, membre: discord.Member, type: Optional[str] = "gym", note: Optional[str] = None):
     user_id = membre.id
     user_name = membre.display_name
     by_name = interaction.user.display_name
@@ -1297,17 +1326,18 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
     timestamp = datetime.datetime.now().isoformat()
 
     checkin_note = f"[par {by_name}] {note}" if note else f"[par {by_name}]"
+    session_type = type or "gym"
 
     c.execute('''
-        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    ''', (user_id, timestamp, week_number, year, None, checkin_note))
+        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ''', (user_id, timestamp, week_number, year, None, checkin_note, session_type))
 
     conn.commit()
     conn.close()
 
-    # Compter les check-ins de la semaine
-    user_count = get_checkins_for_user_week(user_id, week_number, year)
+    # Compter les check-ins de la semaine (gym uniquement pour l'objectif)
+    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
     user_goal = profile['weekly_goal']
     user_activity = profile['activity']
     days = get_days_remaining()
@@ -1337,7 +1367,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
             if p_user_id != user_id:
                 p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p_user_id, week_number, year)
+                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=True)
                 p_frozen = p.get('is_frozen', 0)
                 if p_frozen:
                     progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
@@ -1398,7 +1428,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
             for other in others:
                 other_user_id = int(other['user_id'])
                 other_profile = get_profile(other_user_id)
-                other_count = get_checkins_for_user_week(other_user_id, week_number, year)
+                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=True)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 other_frozen = other.get('is_frozen', 0)
                 if other_frozen:
@@ -1462,14 +1492,14 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, n
 )
 async def deletecheckin(interaction: discord.Interaction, checkin_id: int):
     user_id = interaction.user.id
-    
+
     conn = get_db()
     c = conn.cursor()
-    
+
     # Vérifier que le check-in existe et appartient à l'utilisateur
     c.execute('SELECT id, timestamp, note FROM checkins WHERE id = %s AND user_id = %s', (checkin_id, user_id))
     checkin = c.fetchone()
-    
+
     if not checkin:
         conn.close()
         await interaction.response.send_message(
@@ -1477,15 +1507,15 @@ async def deletecheckin(interaction: discord.Interaction, checkin_id: int):
             ephemeral=True
         )
         return
-    
+
     # Supprimer le check-in
     c.execute('DELETE FROM checkins WHERE id = %s', (checkin_id,))
     conn.commit()
     conn.close()
-    
+
     timestamp = checkin['timestamp'][:10] if checkin['timestamp'] else "?"
     note = checkin['note'] or ""
-    
+
     await interaction.response.send_message(
         f"✅ Check-in #{checkin_id} supprimé ({timestamp} {note})",
         ephemeral=True
@@ -1496,35 +1526,37 @@ async def deletecheckin(interaction: discord.Interaction, checkin_id: int):
 async def mycheckins(interaction: discord.Interaction):
     user_id = interaction.user.id
     week_number, year = get_week_info()
-    
+
     conn = get_db()
     c = conn.cursor()
     c.execute('''
-        SELECT id, timestamp, note 
-        FROM checkins 
+        SELECT id, timestamp, note, session_type
+        FROM checkins
         WHERE user_id = %s AND week_number = %s AND year = %s
         ORDER BY timestamp DESC
     ''', (user_id, week_number, year))
     checkins = c.fetchall()
     conn.close()
-    
+
     if not checkins:
         await interaction.response.send_message("Aucun check-in cette semaine.", ephemeral=True)
         return
-    
+
     lines = []
     for ci in checkins:
         ts = ci['timestamp'][:16].replace('T', ' ') if ci['timestamp'] else "?"
         note = f" - {ci['note']}" if ci['note'] else ""
-        lines.append(f"**#{ci['id']}** | {ts}{note}")
-    
+        session_type = ci.get('session_type') or 'gym'
+        type_icon = "🏃" if session_type == 'cardio' else "🏋️"
+        lines.append(f"**#{ci['id']}** {type_icon} | {ts}{note}")
+
     embed = discord.Embed(
         title=f"📋 Mes check-ins (Semaine {week_number})",
         description="\n".join(lines),
         color=EMBED_COLOR
     )
     embed.set_footer(text="Pour supprimer: /deletecheckin <id>")
-    
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -1567,7 +1599,7 @@ async def stats(interaction: discord.Interaction):
         profile = get_profile(p['user_id'])
         goal = profile['weekly_goal'] if profile else 4
         activity = profile['activity'] if profile else 'Sport'
-        count = get_checkins_for_user_week(p['user_id'], week_number, year)
+        count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=True)
         total = get_total_checkins_user(p['user_id'])
         frozen = p.get('is_frozen', 0)
 
@@ -1725,9 +1757,9 @@ async def calendar_cmd(interaction: discord.Interaction):
     conn = get_db()
     c = conn.cursor()
 
-    # Récupérer tous les check-ins pour cet utilisateur (global)
+    # Récupérer tous les check-ins pour cet utilisateur (global) avec session_type
     c.execute('''
-        SELECT timestamp, note FROM checkins
+        SELECT timestamp, note, session_type FROM checkins
         WHERE user_id = %s
         ORDER BY timestamp DESC
     ''', (user_id,))
@@ -1735,16 +1767,27 @@ async def calendar_cmd(interaction: discord.Interaction):
     rows = c.fetchall()
     conn.close()
 
-    # Extraire les dates avec check-in (30 derniers jours)
-    checkin_dates = []
+    # Extraire les dates avec check-in (30 derniers jours) et tracker le type
+    # On garde une entrée par date avec le type (si plusieurs check-ins le même jour, on prend le premier)
+    checkin_data = {}  # date -> session_type
+    gym_count = 0
+    cardio_count = 0
+    
     for row in rows:
         ts = datetime.datetime.fromisoformat(row['timestamp'])
         ts_date = ts.date()
         if ts_date >= thirty_days_ago and ts_date <= today:
-            checkin_dates.append(ts_date)
+            session_type = row.get('session_type') or 'gym'
+            if ts_date not in checkin_data:
+                checkin_data[ts_date] = session_type
+            # Compter gym vs cardio
+            if session_type == 'cardio':
+                cardio_count += 1
+            else:
+                gym_count += 1
 
-    # Trier les dates (uniques)
-    checkin_dates = sorted(set(checkin_dates))
+    # Trier les dates
+    checkin_dates = sorted(checkin_data.keys())
 
     # Noms des jours
     day_names = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
@@ -1753,11 +1796,19 @@ async def calendar_cmd(interaction: discord.Interaction):
     timeline = ""
     for checkin_date in checkin_dates:
         day_name = day_names[checkin_date.weekday()]
-
-        if checkin_date == today:
-            timeline += f"│  {checkin_date.day:02d} {day_name} ━━◆ aujourd'hui  │\n"
+        session_type = checkin_data[checkin_date]
+        
+        # Afficher 🏃 pour cardio
+        if session_type == 'cardio':
+            if checkin_date == today:
+                timeline += f"│  {checkin_date.day:02d} {day_name} ━━◆ 🏃 today   │\n"
+            else:
+                timeline += f"│  {checkin_date.day:02d} {day_name} ━━● 🏃          │\n"
         else:
-            timeline += f"│  {checkin_date.day:02d} {day_name} ━━━●             │\n"
+            if checkin_date == today:
+                timeline += f"│  {checkin_date.day:02d} {day_name} ━━◆ aujourd'hui  │\n"
+            else:
+                timeline += f"│  {checkin_date.day:02d} {day_name} ━━●              │\n"
 
     # Si pas de check-ins
     if not checkin_dates:
@@ -1767,6 +1818,12 @@ async def calendar_cmd(interaction: discord.Interaction):
         timeline += "│                          │\n"
 
     total_sessions = len(checkin_dates)
+
+    # Stats séparées gym/cardio
+    if cardio_count > 0:
+        stats_line = f"│  🏋️ {gym_count:>2}  │  🏃 {cardio_count:>2}  │  Total: {total_sessions:<2} │"
+    else:
+        stats_line = f"│  Sessions: {total_sessions:<14} │"
 
     embed = discord.Embed(color=EMBED_COLOR)
 
@@ -1780,7 +1837,7 @@ async def calendar_cmd(interaction: discord.Interaction):
 ├──────────────────────────┤
 │                          │
 {timeline}│                          │
-│  Sessions: {total_sessions:<14} │
+{stats_line}
 ╰──────────────────────────╯
 ```"""
 
@@ -2253,7 +2310,7 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
     # Récupérer le profil pour l'objectif
     profile = get_profile(user_id)
     goal = profile['weekly_goal'] if profile else 4
-    current_count = get_checkins_for_user_week(user_id, week_number, year)
+    current_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
 
     # Avec le rescue, le count sera +1
     new_count = current_count + 1
@@ -2263,9 +2320,9 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
         rescue_timestamp = datetime.datetime.now().isoformat()
 
         c.execute('''
-            INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        ''', (user_id, rescue_timestamp, week_number, year, photo.url, "[RESCUE]"))
+            INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ''', (user_id, rescue_timestamp, week_number, year, photo.url, "[RESCUE]", "gym"))
 
         # Ré-ajouter le participant au défi
         c.execute('''
@@ -2288,7 +2345,7 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
         for p in participants:
             p_profile = get_profile(p['user_id'])
             p_goal = p_profile['weekly_goal'] if p_profile else 4
-            p_count = get_checkins_for_user_week(p['user_id'], week_number, year)
+            p_count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=True)
             participants_text += f"{p['user_name'][:12]:12} ——— {p_count}/{p_goal} ✓\n"
 
         embed.description = f"""▸ **RESCUE RÉUSSI !**
@@ -2404,7 +2461,7 @@ async def check_weekly_goals():
             for p in participants:
                 profile = get_profile(p['user_id'])
                 goal = profile['weekly_goal'] if profile else 4
-                count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=True)
                 frozen = p.get('is_frozen', 0)
 
                 if count < goal and not frozen:
@@ -2587,7 +2644,7 @@ async def send_reminders():
             for p in participants:
                 profile = get_profile(p['user_id'])
                 goal = profile['weekly_goal'] if profile else 4
-                count = get_checkins_for_user_week(p['user_id'], week_number, year)
+                count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=True)
                 frozen = p.get('is_frozen', 0)
 
                 remaining = max(0, goal - count) if not frozen else 0
