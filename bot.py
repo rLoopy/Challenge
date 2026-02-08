@@ -369,7 +369,7 @@ def get_user_active_challenges(user_id):
 
 def get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False):
     """Récupère le nombre de check-ins d'un utilisateur pour une semaine
-    
+
     Args:
         count_gym_only: Si True, compte uniquement les sessions gym (pas cardio)
     """
@@ -489,7 +489,7 @@ async def profile_cmd(
     # Statistiques
     total_checkins = get_total_checkins_user(user_id)
     week_number, year = get_week_info()
-    week_checkins = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
+    week_checkins = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
     active_challenges = get_user_active_challenges(user_id)
 
     # Afficher pending_goal si défini
@@ -540,7 +540,7 @@ async def challenges_cmd(interaction: discord.Interaction):
     week_number, year = get_week_info()
     profile = get_profile(user_id)
     user_goal = profile['weekly_goal'] if profile else 4
-    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
+    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
 
     challenges_text = ""
     for challenge in challenges:
@@ -565,7 +565,7 @@ async def challenges_cmd(interaction: discord.Interaction):
             other_user_id = int(other['user_id'])
             other_profile = get_profile(other_user_id)
             other_goal = other_profile['weekly_goal'] if other_profile else 4
-            other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=True)
+            other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=False)
             freeze_mark = "❄" if other.get('is_frozen', 0) else ""
             others_text += f"{other['user_name'][:8]}: {other_count}/{other_goal}{freeze_mark} "
 
@@ -907,7 +907,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
     timestamp = datetime.datetime.now().isoformat()
 
     session_type = type or "gym"
-    
+
     c.execute('''
         INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -917,7 +917,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
     conn.close()
 
     # Compter les check-ins de la semaine (gym uniquement pour l'objectif)
-    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
+    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
     user_goal = profile['weekly_goal']
     user_activity = profile['activity']
     days = get_days_remaining()
@@ -948,7 +948,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
             if p_user_id != user_id:
                 p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=True)
+                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=False)
                 p_frozen = p.get('is_frozen', 0)
                 if p_frozen:
                     progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
@@ -1012,7 +1012,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
             for other in others:
                 other_user_id = int(other['user_id'])
                 other_profile = get_profile(other_user_id)
-                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=True)
+                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=False)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 other_frozen = other.get('is_frozen', 0)
                 if other_frozen:
@@ -1138,7 +1138,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     conn.close()
 
     # Compter les check-ins de la semaine (gym uniquement pour l'objectif)
-    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
+    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
     user_goal = profile['weekly_goal']
     user_activity = profile['activity']
     days = get_days_remaining()
@@ -1170,7 +1170,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             if p_user_id != user_id:
                 p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=True)
+                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=False)
                 p_frozen = p.get('is_frozen', 0)
                 if p_frozen:
                     progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
@@ -1231,7 +1231,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             for other in others:
                 other_user_id = int(other['user_id'])
                 other_profile = get_profile(other_user_id)
-                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=True)
+                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=False)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 other_frozen = other.get('is_frozen', 0)
                 if other_frozen:
@@ -1337,7 +1337,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
     conn.close()
 
     # Compter les check-ins de la semaine (gym uniquement pour l'objectif)
-    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
+    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
     user_goal = profile['weekly_goal']
     user_activity = profile['activity']
     days = get_days_remaining()
@@ -1367,7 +1367,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
             if p_user_id != user_id:
                 p_profile = get_profile(p_user_id)
                 p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=True)
+                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=False)
                 p_frozen = p.get('is_frozen', 0)
                 if p_frozen:
                     progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
@@ -1428,7 +1428,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
             for other in others:
                 other_user_id = int(other['user_id'])
                 other_profile = get_profile(other_user_id)
-                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=True)
+                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=False)
                 other_goal = other_profile['weekly_goal'] if other_profile else 4
                 other_frozen = other.get('is_frozen', 0)
                 if other_frozen:
@@ -1599,7 +1599,7 @@ async def stats(interaction: discord.Interaction):
         profile = get_profile(p['user_id'])
         goal = profile['weekly_goal'] if profile else 4
         activity = profile['activity'] if profile else 'Sport'
-        count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=True)
+        count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=False)
         total = get_total_checkins_user(p['user_id'])
         frozen = p.get('is_frozen', 0)
 
@@ -1772,7 +1772,7 @@ async def calendar_cmd(interaction: discord.Interaction):
     checkin_data = {}  # date -> session_type
     gym_count = 0
     cardio_count = 0
-    
+
     for row in rows:
         ts = datetime.datetime.fromisoformat(row['timestamp'])
         ts_date = ts.date()
@@ -1797,7 +1797,7 @@ async def calendar_cmd(interaction: discord.Interaction):
     for checkin_date in checkin_dates:
         day_name = day_names[checkin_date.weekday()]
         session_type = checkin_data[checkin_date]
-        
+
         # Afficher 🏃 pour cardio
         if session_type == 'cardio':
             if checkin_date == today:
@@ -2310,7 +2310,7 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
     # Récupérer le profil pour l'objectif
     profile = get_profile(user_id)
     goal = profile['weekly_goal'] if profile else 4
-    current_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=True)
+    current_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
 
     # Avec le rescue, le count sera +1
     new_count = current_count + 1
@@ -2345,7 +2345,7 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
         for p in participants:
             p_profile = get_profile(p['user_id'])
             p_goal = p_profile['weekly_goal'] if p_profile else 4
-            p_count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=True)
+            p_count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=False)
             participants_text += f"{p['user_name'][:12]:12} ——— {p_count}/{p_goal} ✓\n"
 
         embed.description = f"""▸ **RESCUE RÉUSSI !**
@@ -2461,7 +2461,7 @@ async def check_weekly_goals():
             for p in participants:
                 profile = get_profile(p['user_id'])
                 goal = profile['weekly_goal'] if profile else 4
-                count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=True)
+                count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=False)
                 frozen = p.get('is_frozen', 0)
 
                 if count < goal and not frozen:
@@ -2644,7 +2644,7 @@ async def send_reminders():
             for p in participants:
                 profile = get_profile(p['user_id'])
                 goal = profile['weekly_goal'] if profile else 4
-                count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=True)
+                count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=False)
                 frozen = p.get('is_frozen', 0)
 
                 remaining = max(0, goal - count) if not frozen else 0
