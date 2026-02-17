@@ -868,6 +868,83 @@ async def removeplayer_cmd(interaction: discord.Interaction, joueur: discord.Mem
     await interaction.response.send_message(embed=embed)
 
 
+@bot.tree.command(name="setgoal", description="Changer l'objectif hebdo d'un joueur")
+@app_commands.describe(
+    joueur="Le joueur dont tu veux changer l'objectif",
+    objectif="Nouvel objectif (sessions par semaine, entre 1 et 7)"
+)
+async def setgoal_cmd(
+    interaction: discord.Interaction,
+    joueur: discord.Member,
+    objectif: int
+):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande serveur uniquement.", ephemeral=True)
+        return
+
+    if objectif <= 0 or objectif > 7:
+        await interaction.response.send_message("L'objectif doit être entre 1 et 7.", ephemeral=True)
+        return
+
+    guild_id = interaction.guild.id
+    challenge = get_active_challenge_for_guild(guild_id)
+
+    if not challenge:
+        await interaction.response.send_message("Pas de défi actif sur ce serveur.", ephemeral=True)
+        return
+
+    # Vérifier que le joueur participe au défi
+    participant = get_participant(challenge['id'], joueur.id)
+    if not participant:
+        await interaction.response.send_message(f"{joueur.display_name} ne participe pas au défi.", ephemeral=True)
+        return
+
+    # Récupérer l'ancien objectif
+    profile = get_or_create_profile(joueur.id, joueur.display_name)
+    old_goal = profile['weekly_goal']
+
+    if old_goal == objectif:
+        await interaction.response.send_message(f"{joueur.display_name} a déjà un objectif de {objectif}x/semaine.", ephemeral=True)
+        return
+
+    # Mettre à jour immédiatement
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('UPDATE profiles SET weekly_goal = %s, pending_goal = NULL WHERE user_id = %s', (objectif, joueur.id))
+    conn.commit()
+    conn.close()
+
+    # Stats actuelles
+    week_number, year = get_week_info()
+    week_checkins = get_checkins_for_user_week(joueur.id, week_number, year, count_gym_only=False)
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **OBJECTIF MODIFIÉ**
+
+**{joueur.display_name}**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **CHANGEMENT**
+```
+{format_stat_line("AVANT", f"{old_goal}x/semaine")}
+{format_stat_line("APRÈS", f"{objectif}x/semaine")}
+```
+
+◆ **PROGRESSION**
+```
+{format_stat_line("CETTE SEMAINE", f"{week_checkins}/{objectif}")}
+{progress_bar(week_checkins, objectif)}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▼ Changement appliqué immédiatement."""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(f"<@{joueur.id}>", embed=embed)
+
+
 @bot.tree.command(name="checkin", description="Enregistrer une session")
 @app_commands.describe(
     photo="Photo de ta session",
@@ -1868,6 +1945,7 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 /setup       — Créer un défi
 /addplayer   — Ajouter un joueur
 /removeplayer— Retirer un joueur
+/setgoal     — Changer l'objectif d'un joueur
 /setchannel  — Salon des check-ins
 /checkin     — Session + photo
 /latecheckin — Session d'HIER
