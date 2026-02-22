@@ -1923,6 +1923,245 @@ async def calendar_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+@bot.tree.command(name="mystats", description="Tes statistiques complètes (all-time)")
+async def mystats_cmd(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user_name = interaction.user.display_name
+
+    profile = get_or_create_profile(user_id, user_name)
+    user_activity = profile['activity']
+    weekly_goal = profile['weekly_goal']
+
+    conn = get_db()
+    c = conn.cursor()
+
+    # Tous les check-ins
+    c.execute('''
+        SELECT timestamp, session_type, week_number, year
+        FROM checkins WHERE user_id = %s
+        ORDER BY timestamp ASC
+    ''', (user_id,))
+    all_checkins = c.fetchall()
+
+    # Défis actifs
+    active_challenges = get_user_active_challenges(user_id)
+
+    # Défis terminés (dans l'historique)
+    c.execute('''
+        SELECT COUNT(*) as count FROM history
+        WHERE winner_id = %s OR loser_id = %s
+    ''', (user_id, user_id))
+    total_challenges_done = c.fetchone()['count']
+
+    c.execute('''
+        SELECT COUNT(*) as count FROM history
+        WHERE winner_id = %s
+    ''', (user_id,))
+    challenges_won = c.fetchone()['count']
+
+    conn.close()
+
+    total_sessions = len(all_checkins)
+
+    if total_sessions == 0:
+        embed = discord.Embed(color=EMBED_COLOR)
+        embed.description = f"""▸ **MES STATISTIQUES**
+
+**{user_name.upper()}** — {user_activity}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Aucune session enregistrée.
+Commence avec `/checkin` !"""
+        embed.set_footer(text="◆ Challenge Bot")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Comptage par type
+    gym_count = sum(1 for ci in all_checkins if (ci.get('session_type') or 'gym') == 'gym')
+    cardio_count = sum(1 for ci in all_checkins if (ci.get('session_type') or 'gym') == 'cardio')
+
+    # Premier et dernier check-in
+    first_ts = datetime.datetime.fromisoformat(all_checkins[0]['timestamp'])
+    last_ts = datetime.datetime.fromisoformat(all_checkins[-1]['timestamp'])
+    now = datetime.datetime.now(PARIS_TZ)
+
+    if first_ts.tzinfo is None:
+        first_ts = first_ts.replace(tzinfo=PARIS_TZ)
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.replace(tzinfo=PARIS_TZ)
+
+    # Durée depuis le premier check-in
+    delta = now - first_ts
+    total_days = delta.days
+    if total_days >= 365:
+        years = total_days // 365
+        remaining_days = total_days % 365
+        months = remaining_days // 30
+        if years > 0 and months > 0:
+            since_text = f"{years}a {months}m"
+        else:
+            since_text = f"{years}a"
+    elif total_days >= 30:
+        months = total_days // 30
+        days_r = total_days % 30
+        since_text = f"{months}m {days_r}j"
+    else:
+        since_text = f"{total_days}j"
+
+    # Semaines avec au moins un check-in
+    weeks_set = set()
+    for ci in all_checkins:
+        weeks_set.add((ci['year'], ci['week_number']))
+    total_weeks_active = len(weeks_set)
+
+    # Moyenne par semaine (basée sur les semaines écoulées depuis le premier check-in)
+    total_calendar_weeks = max(1, (total_days // 7) + 1)
+    avg_per_week = total_sessions / total_calendar_weeks
+
+    # Semaines avec objectif atteint (streak tracking)
+    week_counts = {}
+    for ci in all_checkins:
+        key = (ci['year'], ci['week_number'])
+        week_counts[key] = week_counts.get(key, 0) + 1
+
+    # Trier les semaines chronologiquement
+    sorted_weeks = sorted(week_counts.keys())
+
+    # Streak actuelle et meilleure streak (semaines consécutives avec objectif atteint)
+    current_streak = 0
+    best_streak = 0
+    temp_streak = 0
+    weeks_validated = 0
+
+    current_week_key = get_week_info()
+    current_week_key = (current_week_key[1], current_week_key[0])  # (year, week)
+
+    for wk in sorted_weeks:
+        if week_counts[wk] >= weekly_goal:
+            temp_streak += 1
+            weeks_validated += 1
+            best_streak = max(best_streak, temp_streak)
+        else:
+            temp_streak = 0
+
+    # La streak actuelle = la dernière streak qui touche la semaine courante ou précédente
+    current_streak = 0
+    for wk in reversed(sorted_weeks):
+        if wk == current_week_key:
+            week_number_now, year_now = get_week_info()
+            current_count = get_checkins_for_user_week(user_id, week_number_now, year_now, count_gym_only=False)
+            if current_count >= weekly_goal:
+                current_streak += 1
+            else:
+                break
+        elif week_counts[wk] >= weekly_goal:
+            current_streak += 1
+        else:
+            break
+
+    # Taux de réussite
+    success_rate = (weeks_validated / total_calendar_weeks * 100) if total_calendar_weeks > 0 else 0
+
+    # Meilleure semaine (plus de sessions)
+    best_week_count = max(week_counts.values()) if week_counts else 0
+
+    # Jour préféré
+    day_counts = [0] * 7
+    for ci in all_checkins:
+        ts = datetime.datetime.fromisoformat(ci['timestamp'])
+        day_counts[ts.weekday()] += 1
+    day_names = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+    fav_day_idx = day_counts.index(max(day_counts))
+    fav_day = day_names[fav_day_idx]
+    fav_day_count = day_counts[fav_day_idx]
+
+    # Sessions cette semaine
+    week_number, year = get_week_info()
+    week_checkins = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
+
+    # Date du premier check-in formatée
+    first_date_str = first_ts.strftime("%d/%m/%Y")
+
+    # Construire les barres de répartition gym/cardio
+    if total_sessions > 0:
+        gym_pct = gym_count / total_sessions * 100
+        cardio_pct = cardio_count / total_sessions * 100
+        bar_len = 16
+        gym_blocks = round(gym_pct / 100 * bar_len)
+        cardio_blocks = bar_len - gym_blocks
+        type_bar = "■" * gym_blocks + "□" * cardio_blocks
+    else:
+        gym_pct = 0
+        cardio_pct = 0
+        type_bar = "□" * 16
+
+    # Construire le visuel
+    embed = discord.Embed(color=EMBED_COLOR)
+
+    # Section type seulement si il y a du cardio
+    type_section = ""
+    if cardio_count > 0:
+        type_section = f"""
+◆ **RÉPARTITION**
+```
+🏋️ Gym    ——————— {gym_count} ({gym_pct:.0f}%)
+🏃 Cardio ——————— {cardio_count} ({cardio_pct:.0f}%)
+{type_bar}
+```
+"""
+
+    embed.description = f"""▸ **MES STATISTIQUES**
+
+**{user_name.upper()}** — {user_activity}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **GLOBAL**
+```
+{format_stat_line("SESSIONS", str(total_sessions))}
+{format_stat_line("DEPUIS", f"{first_date_str} ({since_text})")}
+{format_stat_line("SEMAINES", str(total_weeks_active))}
+```
+
+◆ **PERFORMANCE**
+```
+{format_stat_line("MOY/SEMAINE", f"{avg_per_week:.1f} sessions")}
+{format_stat_line("OBJECTIF", f"{weekly_goal}x/semaine")}
+{format_stat_line("TAUX RÉUSSITE", f"{success_rate:.0f}%")}
+{format_stat_line("MEILLEUR SEM", f"{best_week_count} sessions")}
+```
+
+◆ **STREAKS**
+```
+{format_stat_line("ACTUELLE", f"{current_streak} sem ✓" if current_streak > 0 else "—")}
+{format_stat_line("MEILLEURE", f"{best_streak} sem 🔥" if best_streak > 0 else "—")}
+```
+{type_section}
+◆ **HABITUDES**
+```
+{format_stat_line("JOUR PRÉFÉRÉ", f"{fav_day} ({fav_day_count}x)")}
+```
+
+◆ **CETTE SEMAINE**
+```
+{format_stat_line("PROGRESSION", f"{week_checkins}/{weekly_goal}")}
+{progress_bar(week_checkins, weekly_goal)}
+```
+
+◆ **DÉFIS**
+```
+{format_stat_line("ACTIFS", str(len(active_challenges)))}
+{format_stat_line("TERMINÉS", str(total_challenges_done))}
+{format_stat_line("GAGNÉS", str(challenges_won))}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+
+    embed.set_footer(text=f"◆ Challenge Bot • Depuis le {first_date_str}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="help", description="Aide")
 async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(color=EMBED_COLOR)
@@ -1937,6 +2176,7 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 ```
 /profile    — Config activité + objectif
 /calendar   — Ton calendrier perso
+/mystats    — Tes stats complètes
 /challenges — Tous tes défis actifs
 ```
 
