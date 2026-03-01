@@ -110,6 +110,22 @@ def init_db():
         END $$;
     ''')
 
+    # Migration: cycle personnalisé (cycle_days, cycle_goal, cycle_start_date)
+    c.execute('''
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='profiles' AND column_name='cycle_days') THEN
+                ALTER TABLE profiles ADD COLUMN cycle_days INTEGER DEFAULT 7;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='profiles' AND column_name='cycle_goal') THEN
+                ALTER TABLE profiles ADD COLUMN cycle_goal INTEGER;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='profiles' AND column_name='cycle_start_date') THEN
+                ALTER TABLE profiles ADD COLUMN cycle_start_date TEXT;
+            END IF;
+        END $$;
+    ''')
+
     # Table des défis (par serveur) - NOUVELLE STRUCTURE SIMPLIFIÉE
     c.execute('''
         CREATE TABLE IF NOT EXISTS challenge (
@@ -407,6 +423,69 @@ def get_checkins_for_challenge_week(challenge_id, week_number, year):
         result[p['user_id']] = get_checkins_for_user_week(p['user_id'], week_number, year)
     return result
 
+def get_checkins_for_user_cycle(user_id, cycle_start_date, cycle_days):
+    """Compte les check-ins dans un cycle personnalisé (par plage de dates)"""
+    start = datetime.datetime.fromisoformat(cycle_start_date)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=PARIS_TZ)
+    end = start + datetime.timedelta(days=cycle_days)
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        SELECT COUNT(*) as count FROM checkins
+        WHERE user_id = %s AND timestamp >= %s AND timestamp < %s
+    ''', (user_id, start.isoformat(), end.isoformat()))
+    result = c.fetchone()['count']
+    conn.close()
+    return result
+
+def get_user_progress(user_id, profile=None):
+    """Retourne (count, goal) pour un utilisateur, gère weekly et custom cycles"""
+    if profile is None:
+        profile = get_profile(user_id)
+
+    cycle_days = (profile.get('cycle_days') or 7) if profile else 7
+
+    if cycle_days == 7:
+        week_number, year = get_week_info()
+        count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
+        goal = profile['weekly_goal'] if profile else 4
+        return count, goal
+    else:
+        cycle_goal = (profile.get('cycle_goal') or profile['weekly_goal']) if profile else 4
+        cycle_start = profile.get('cycle_start_date') if profile else None
+        if not cycle_start:
+            return 0, cycle_goal
+        count = get_checkins_for_user_cycle(user_id, cycle_start, cycle_days)
+        return count, cycle_goal
+
+def get_cycle_days_remaining(profile):
+    """Retourne les jours restants dans le cycle d'un utilisateur"""
+    cycle_days = (profile.get('cycle_days') or 7) if profile else 7
+    if cycle_days == 7:
+        return get_days_remaining()
+    cycle_start = profile.get('cycle_start_date')
+    if not cycle_start:
+        return cycle_days
+    start = datetime.datetime.fromisoformat(cycle_start)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=PARIS_TZ)
+    end = start + datetime.timedelta(days=cycle_days)
+    now = datetime.datetime.now(PARIS_TZ)
+    return max(0, (end - now).days)
+
+def get_cycle_label(profile):
+    """Retourne le label du cycle (SEMAINE ou CYCLE Xj)"""
+    cycle_days = (profile.get('cycle_days') or 7) if profile else 7
+    if cycle_days == 7:
+        return "CETTE SEMAINE"
+    return f"CYCLE ({cycle_days}J)"
+
+def is_custom_cycle(profile):
+    """Vérifie si un utilisateur a un cycle personnalisé"""
+    return profile and (profile.get('cycle_days') or 7) != 7
+
 # ══════════════════════════════════════════════════════════════
 #                       BOT EVENTS
 # ══════════════════════════════════════════════════════════════
@@ -424,6 +503,7 @@ async def on_ready():
 
     check_weekly_goals.start()
     send_reminders.start()
+    check_custom_cycles.start()
 
 # ══════════════════════════════════════════════════════════════
 #                       COMMANDS
@@ -488,15 +568,21 @@ async def profile_cmd(
 
     # Statistiques
     total_checkins = get_total_checkins_user(user_id)
-    week_number, year = get_week_info()
-    week_checkins = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
+    current_count, current_goal = get_user_progress(user_id, profile)
     active_challenges = get_user_active_challenges(user_id)
 
     # Afficher pending_goal si défini
     pending_goal = profile.get('pending_goal')
-    goal_display = f"{profile['weekly_goal']}x/semaine"
-    if pending_goal:
-        goal_display += f" → {pending_goal}x lundi"
+    cycle_days = profile.get('cycle_days') or 7
+    if cycle_days == 7:
+        goal_display = f"{profile['weekly_goal']}x/semaine"
+        if pending_goal:
+            goal_display += f" → {pending_goal}x lundi"
+        period_label = "CETTE SEMAINE"
+    else:
+        cycle_goal = profile.get('cycle_goal') or profile['weekly_goal']
+        goal_display = f"{cycle_goal}x/{cycle_days}j"
+        period_label = f"CYCLE ({cycle_days}J)"
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""▸ **PROFIL**
@@ -513,7 +599,7 @@ async def profile_cmd(
 
 ◆ **STATS**
 ```
-{format_stat_line("CETTE SEMAINE", f"{week_checkins}/{profile['weekly_goal']}")}
+{format_stat_line(period_label, f"{current_count}/{current_goal}")}
 {format_stat_line("TOTAL", str(total_checkins))}
 {format_stat_line("DÉFIS ACTIFS", str(len(active_challenges)))}
 ```
@@ -537,10 +623,9 @@ async def challenges_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("Tu n'as pas de défi actif.", ephemeral=True)
         return
 
-    week_number, year = get_week_info()
     profile = get_profile(user_id)
-    user_goal = profile['weekly_goal'] if profile else 4
-    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
+    user_count, user_goal = get_user_progress(user_id, profile)
+    user_period = get_cycle_label(profile)
 
     challenges_text = ""
     for challenge in challenges:
@@ -564,8 +649,7 @@ async def challenges_cmd(interaction: discord.Interaction):
         for other in others:
             other_user_id = int(other['user_id'])
             other_profile = get_profile(other_user_id)
-            other_goal = other_profile['weekly_goal'] if other_profile else 4
-            other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=False)
+            other_count, other_goal = get_user_progress(other_user_id, other_profile)
             freeze_mark = "❄" if other.get('is_frozen', 0) else ""
             others_text += f"{other['user_name'][:8]}: {other_count}/{other_goal}{freeze_mark} "
 
@@ -580,7 +664,7 @@ Gage: {my_gage[:20]}
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""▸ **TES DÉFIS**
 
-**{user_name.upper()}** — {user_count}/{user_goal} cette semaine
+**{user_name.upper()}** — {user_count}/{user_goal} {user_period.lower()}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {challenges_text}
@@ -945,6 +1029,109 @@ async def setgoal_cmd(
     await interaction.response.send_message(f"<@{joueur.id}>", embed=embed)
 
 
+@bot.tree.command(name="setcycle", description="Passer un joueur en cycle personnalisé (ex: 7 sessions sur 9 jours)")
+@app_commands.describe(
+    joueur="Le joueur à configurer",
+    jours="Durée du cycle en jours (ex: 9)",
+    objectif="Nombre de sessions à atteindre dans le cycle (ex: 7)",
+    reset="Remettre en mode semaine classique (7j)"
+)
+async def setcycle_cmd(
+    interaction: discord.Interaction,
+    joueur: discord.Member,
+    jours: Optional[int] = None,
+    objectif: Optional[int] = None,
+    reset: Optional[bool] = False
+):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande serveur uniquement.", ephemeral=True)
+        return
+
+    profile = get_or_create_profile(joueur.id, joueur.display_name)
+
+    if reset:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('''
+            UPDATE profiles SET cycle_days = 7, cycle_goal = NULL, cycle_start_date = NULL
+            WHERE user_id = %s
+        ''', (joueur.id,))
+        conn.commit()
+        conn.close()
+
+        embed = discord.Embed(color=EMBED_COLOR)
+        embed.description = f"""▸ **CYCLE RÉINITIALISÉ**
+
+**{joueur.display_name}** repasse en mode **semaine classique** (7j).
+
+Objectif: {profile['weekly_goal']}x/semaine"""
+        embed.set_footer(text="◆ Challenge Bot")
+        await interaction.response.send_message(embed=embed)
+        return
+
+    if jours is None or objectif is None:
+        await interaction.response.send_message(
+            "Précise `jours` et `objectif`. Ex: `/setcycle joueur:@X jours:9 objectif:7`",
+            ephemeral=True
+        )
+        return
+
+    if jours < 2 or jours > 30:
+        await interaction.response.send_message("Le cycle doit être entre 2 et 30 jours.", ephemeral=True)
+        return
+
+    if objectif <= 0 or objectif > jours:
+        await interaction.response.send_message(f"L'objectif doit être entre 1 et {jours}.", ephemeral=True)
+        return
+
+    now = datetime.datetime.now(PARIS_TZ)
+    cycle_start = now.strftime('%Y-%m-%dT00:00:00')
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        UPDATE profiles SET cycle_days = %s, cycle_goal = %s, cycle_start_date = %s
+        WHERE user_id = %s
+    ''', (jours, objectif, cycle_start, joueur.id))
+    conn.commit()
+    conn.close()
+
+    # Compter les sessions déjà faites aujourd'hui
+    current_count, current_goal = get_user_progress(joueur.id)
+
+    cycle_end = now + datetime.timedelta(days=jours)
+    cycle_end_str = cycle_end.strftime('%d/%m')
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **CYCLE PERSONNALISÉ**
+
+**{joueur.display_name}**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **CONFIGURATION**
+```
+{format_stat_line("CYCLE", f"{jours} jours")}
+{format_stat_line("OBJECTIF", f"{objectif} sessions")}
+{format_stat_line("FIN CYCLE", cycle_end_str)}
+```
+
+◆ **PROGRESSION**
+```
+{format_stat_line("SESSIONS", f"{current_count}/{objectif}")}
+{progress_bar(current_count, objectif)}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▼ Cycle démarré maintenant.
+▼ Vérification auto à la fin de chaque cycle.
+▼ `/setcycle reset:True` pour revenir en semaine."""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(f"<@{joueur.id}>", embed=embed)
+
+
 @bot.tree.command(name="checkin", description="Enregistrer une session")
 @app_commands.describe(
     photo="Photo de ta session",
@@ -993,11 +1180,9 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
     conn.commit()
     conn.close()
 
-    # Compter les check-ins de la semaine (gym uniquement pour l'objectif)
-    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
-    user_goal = profile['weekly_goal']
+    user_count, user_goal = get_user_progress(user_id, profile)
     user_activity = profile['activity']
-    days = get_days_remaining()
+    days = get_cycle_days_remaining(profile)
 
     # Statut
     if user_count >= user_goal:
@@ -1024,14 +1209,20 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
             p_user_id = int(p['user_id'])
             if p_user_id != user_id:
                 p_profile = get_profile(p_user_id)
-                p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=False)
+                p_count, p_goal = get_user_progress(p_user_id, p_profile)
                 p_frozen = p.get('is_frozen', 0)
                 if p_frozen:
                     progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
                 else:
                     progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
                 ping_ids.append(p_user_id)
+
+    # Deadline adaptée au type de cycle
+    if is_custom_cycle(profile):
+        cd = profile.get('cycle_days', 7)
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('CYCLE', f'{cd}j')}"
+    else:
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
@@ -1050,15 +1241,14 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
 
 ◆ **TEMPS RESTANT**
 ```
-{format_stat_line("JOURS", f"{days}j")}
-{format_stat_line("DEADLINE", "Dimanche 23h")}
+{deadline_text}
 ```"""
 
     embed.set_image(url=photo.url)
     embed.set_footer(text=f"◆ Challenge Bot • {datetime.datetime.now().strftime('%H:%M')}")
 
     # Compter les autres serveurs où on doit cross-poster
-    other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
+    other_challenges = [ch for ch in active_challenges if ch['guild_id'] != current_guild_id]
 
     # Ajouter le feedback cross-post prévu
     if other_challenges:
@@ -1089,8 +1279,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
             for other in others:
                 other_user_id = int(other['user_id'])
                 other_profile = get_profile(other_user_id)
-                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=False)
-                other_goal = other_profile['weekly_goal'] if other_profile else 4
+                other_count, other_goal = get_user_progress(other_user_id, other_profile)
                 other_frozen = other.get('is_frozen', 0)
                 if other_frozen:
                     progression_text += f"{other['user_name'][:10]:10} ❄️ FREEZE\n"
@@ -1214,11 +1403,9 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     conn.commit()
     conn.close()
 
-    # Compter les check-ins de la semaine (gym uniquement pour l'objectif)
-    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
-    user_goal = profile['weekly_goal']
+    user_count, user_goal = get_user_progress(user_id, profile)
     user_activity = profile['activity']
-    days = get_days_remaining()
+    days = get_cycle_days_remaining(profile)
 
     # Statut
     if user_count >= user_goal:
@@ -1246,14 +1433,19 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             p_user_id = int(p['user_id'])
             if p_user_id != user_id:
                 p_profile = get_profile(p_user_id)
-                p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=False)
+                p_count, p_goal = get_user_progress(p_user_id, p_profile)
                 p_frozen = p.get('is_frozen', 0)
                 if p_frozen:
                     progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
                 else:
                     progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
                 ping_ids.append(p_user_id)
+
+    if is_custom_cycle(profile):
+        cd = profile.get('cycle_days', 7)
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('CYCLE', f'{cd}j')}"
+    else:
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}** (hier {yesterday_str})
@@ -1272,8 +1464,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
 
 ◆ **TEMPS RESTANT**
 ```
-{format_stat_line("JOURS", f"{days}j")}
-{format_stat_line("DEADLINE", "Dimanche 23h")}
+{deadline_text}
 ```
 
 ⏰ *Check-in enregistré pour hier*"""
@@ -1282,7 +1473,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     embed.set_footer(text=f"◆ Challenge Bot • Late check-in")
 
     # Compter les autres serveurs
-    other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
+    other_challenges = [ch for ch in active_challenges if ch['guild_id'] != current_guild_id]
 
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
@@ -1308,8 +1499,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             for other in others:
                 other_user_id = int(other['user_id'])
                 other_profile = get_profile(other_user_id)
-                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=False)
-                other_goal = other_profile['weekly_goal'] if other_profile else 4
+                other_count, other_goal = get_user_progress(other_user_id, other_profile)
                 other_frozen = other.get('is_frozen', 0)
                 if other_frozen:
                     progression_text += f"{other['user_name'][:10]:10} ❄️ FREEZE\n"
@@ -1413,11 +1603,9 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
     conn.commit()
     conn.close()
 
-    # Compter les check-ins de la semaine (gym uniquement pour l'objectif)
-    user_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
-    user_goal = profile['weekly_goal']
+    user_count, user_goal = get_user_progress(user_id, profile)
     user_activity = profile['activity']
-    days = get_days_remaining()
+    days = get_cycle_days_remaining(profile)
 
     # Statut
     if user_count >= user_goal:
@@ -1443,14 +1631,19 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
             p_user_id = int(p['user_id'])
             if p_user_id != user_id:
                 p_profile = get_profile(p_user_id)
-                p_goal = p_profile['weekly_goal'] if p_profile else 4
-                p_count = get_checkins_for_user_week(p_user_id, week_number, year, count_gym_only=False)
+                p_count, p_goal = get_user_progress(p_user_id, p_profile)
                 p_frozen = p.get('is_frozen', 0)
                 if p_frozen:
                     progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
                 else:
                     progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
                 ping_ids.append(p_user_id)
+
+    if is_custom_cycle(profile):
+        cd = profile.get('cycle_days', 7)
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('CYCLE', f'{cd}j')}"
+    else:
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
@@ -1469,8 +1662,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
 
 ◆ **TEMPS RESTANT**
 ```
-{format_stat_line("JOURS", f"{days}j")}
-{format_stat_line("DEADLINE", "Dimanche 23h")}
+{deadline_text}
 ```
 
 👤 *Enregistré par {by_name}*"""
@@ -1478,7 +1670,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
     embed.set_footer(text=f"◆ Challenge Bot • {datetime.datetime.now().strftime('%H:%M')}")
 
     # Compter les serveurs pour cross-post
-    other_challenges = [c for c in active_challenges if c['guild_id'] != current_guild_id]
+    other_challenges = [ch for ch in active_challenges if ch['guild_id'] != current_guild_id]
 
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
@@ -1505,8 +1697,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
             for other in others:
                 other_user_id = int(other['user_id'])
                 other_profile = get_profile(other_user_id)
-                other_count = get_checkins_for_user_week(other_user_id, week_number, year, count_gym_only=False)
-                other_goal = other_profile['weekly_goal'] if other_profile else 4
+                other_count, other_goal = get_user_progress(other_user_id, other_profile)
                 other_frozen = other.get('is_frozen', 0)
                 if other_frozen:
                     progression_text += f"{other['user_name'][:10]:10} ❄️ FREEZE\n"
@@ -1674,9 +1865,8 @@ async def stats(interaction: discord.Interaction):
 
     for p in participants:
         profile = get_profile(p['user_id'])
-        goal = profile['weekly_goal'] if profile else 4
+        count, goal = get_user_progress(p['user_id'], profile)
         activity = profile['activity'] if profile else 'Sport'
-        count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=False)
         total = get_total_checkins_user(p['user_id'])
         frozen = p.get('is_frozen', 0)
 
@@ -1974,7 +2164,7 @@ async def mystats_cmd(interaction: discord.Interaction):
 Aucune session enregistrée.
 Commence avec `/checkin` !"""
         embed.set_footer(text="◆ Challenge Bot")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
         return
 
     # Comptage par type
@@ -2076,9 +2266,9 @@ Commence avec `/checkin` !"""
     fav_day = day_names[fav_day_idx]
     fav_day_count = day_counts[fav_day_idx]
 
-    # Sessions cette semaine
-    week_number, year = get_week_info()
-    week_checkins = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
+    # Sessions en cours (semaine ou cycle)
+    current_progress_count, current_progress_goal = get_user_progress(user_id, profile)
+    period_label = get_cycle_label(profile)
 
     # Date du premier check-in formatée
     first_date_str = first_ts.strftime("%d/%m/%Y")
@@ -2127,7 +2317,7 @@ Commence avec `/checkin` !"""
 ◆ **PERFORMANCE**
 ```
 {format_stat_line("MOY/SEMAINE", f"{avg_per_week:.1f} sessions")}
-{format_stat_line("OBJECTIF", f"{weekly_goal}x/semaine")}
+{format_stat_line("OBJECTIF", f"{current_progress_goal}x/{(profile.get('cycle_days') or 7)}j")}
 {format_stat_line("TAUX RÉUSSITE", f"{success_rate:.0f}%")}
 {format_stat_line("MEILLEUR SEM", f"{best_week_count} sessions")}
 ```
@@ -2143,10 +2333,10 @@ Commence avec `/checkin` !"""
 {format_stat_line("JOUR PRÉFÉRÉ", f"{fav_day} ({fav_day_count}x)")}
 ```
 
-◆ **CETTE SEMAINE**
+◆ **{period_label}**
 ```
-{format_stat_line("PROGRESSION", f"{week_checkins}/{weekly_goal}")}
-{progress_bar(week_checkins, weekly_goal)}
+{format_stat_line("PROGRESSION", f"{current_progress_count}/{current_progress_goal}")}
+{progress_bar(current_progress_count, current_progress_goal)}
 ```
 
 ◆ **DÉFIS**
@@ -2159,7 +2349,7 @@ Commence avec `/checkin` !"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
 
     embed.set_footer(text=f"◆ Challenge Bot • Depuis le {first_date_str}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="help", description="Aide")
@@ -2186,6 +2376,7 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 /addplayer   — Ajouter un joueur
 /removeplayer— Retirer un joueur
 /setgoal     — Changer l'objectif d'un joueur
+/setcycle    — Cycle perso (ex: 7x/9j)
 /setchannel  — Salon des check-ins
 /checkin     — Session + photo
 /latecheckin — Session d'HIER
@@ -2627,8 +2818,7 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
 
     # Récupérer le profil pour l'objectif
     profile = get_profile(user_id)
-    goal = profile['weekly_goal'] if profile else 4
-    current_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
+    current_count, goal = get_user_progress(user_id, profile)
 
     # Avec le rescue, le count sera +1
     new_count = current_count + 1
@@ -2661,9 +2851,7 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
 
         participants_text = ""
         for p in participants:
-            p_profile = get_profile(p['user_id'])
-            p_goal = p_profile['weekly_goal'] if p_profile else 4
-            p_count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=False)
+            p_count, p_goal = get_user_progress(p['user_id'])
             participants_text += f"{p['user_name'][:12]:12} ——— {p_count}/{p_goal} ✓\n"
 
         embed.description = f"""▸ **RESCUE RÉUSSI !**
@@ -2778,9 +2966,23 @@ async def check_weekly_goals():
 
             for p in participants:
                 profile = get_profile(p['user_id'])
+                frozen = p.get('is_frozen', 0)
+
+                # Les utilisateurs avec cycle custom sont gérés par check_custom_cycles
+                if is_custom_cycle(profile):
+                    count, goal = get_user_progress(p['user_id'], profile)
+                    success_participants.append({
+                        'user_id': p['user_id'],
+                        'user_name': p['user_name'],
+                        'count': count,
+                        'goal': goal,
+                        'frozen': False,
+                        'custom_cycle': True
+                    })
+                    continue
+
                 goal = profile['weekly_goal'] if profile else 4
                 count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=False)
-                frozen = p.get('is_frozen', 0)
 
                 if count < goal and not frozen:
                     failed_participants.append({
@@ -2961,8 +3163,7 @@ async def send_reminders():
 
             for p in participants:
                 profile = get_profile(p['user_id'])
-                goal = profile['weekly_goal'] if profile else 4
-                count = get_checkins_for_user_week(p['user_id'], week_number, year, count_gym_only=False)
+                count, goal = get_user_progress(p['user_id'], profile)
                 frozen = p.get('is_frozen', 0)
 
                 remaining = max(0, goal - count) if not frozen else 0
@@ -2985,12 +3186,121 @@ async def send_reminders():
             print(f"Erreur send_reminders pour challenge {challenge.get('id')}: {e}")
 
 
+@tasks.loop(minutes=1)
+async def check_custom_cycles():
+    """Vérifie les cycles personnalisés à minuit chaque jour"""
+    now = datetime.datetime.now(PARIS_TZ)
+
+    if now.hour != 0 or now.minute != 0:
+        return
+
+    conn = get_db()
+    c = conn.cursor()
+
+    # Trouver tous les profils avec cycle custom dont le cycle est terminé
+    c.execute('''
+        SELECT * FROM profiles
+        WHERE cycle_days IS NOT NULL AND cycle_days != 7
+        AND cycle_start_date IS NOT NULL
+    ''')
+    cycle_profiles = c.fetchall()
+
+    for profile in cycle_profiles:
+        try:
+            cycle_start = datetime.datetime.fromisoformat(profile['cycle_start_date'])
+            if cycle_start.tzinfo is None:
+                cycle_start = cycle_start.replace(tzinfo=PARIS_TZ)
+
+            cycle_end = cycle_start + datetime.timedelta(days=profile['cycle_days'])
+
+            # Le cycle n'est pas encore terminé
+            if now < cycle_end:
+                continue
+
+            user_id = int(profile['user_id'])
+            cycle_goal = profile.get('cycle_goal') or profile['weekly_goal']
+            count = get_checkins_for_user_cycle(user_id, profile['cycle_start_date'], profile['cycle_days'])
+
+            if count >= cycle_goal:
+                # Cycle réussi → démarrer un nouveau cycle
+                c.execute('''
+                    UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s
+                ''', (now.strftime('%Y-%m-%dT00:00:00'), user_id))
+                print(f"Cycle réussi pour {profile['user_name']}: {count}/{cycle_goal}, nouveau cycle démarré")
+            else:
+                # Cycle échoué → éliminer de tous les défis actifs
+                challenges = get_user_active_challenges(user_id)
+                for challenge in challenges:
+                    participant = get_participant(challenge['id'], user_id)
+                    if not participant:
+                        continue
+
+                    frozen = participant.get('is_frozen', 0)
+                    if frozen:
+                        continue
+
+                    # Retirer le participant
+                    c.execute('DELETE FROM challenge_participants WHERE challenge_id = %s AND user_id = %s',
+                              (challenge['id'], user_id))
+
+                    total_weeks = challenge.get('total_weeks', 0)
+                    c.execute('''
+                        INSERT INTO history (challenge_id, guild_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
+                        VALUES (%s, %s, NULL, NULL, %s, %s, %s, %s, %s, %s)
+                    ''', (challenge['id'], challenge['guild_id'], user_id, profile['user_name'],
+                          participant['gage'], now.isoformat(), f'Cycle {profile["cycle_days"]}j non atteint ({count}/{cycle_goal})', total_weeks))
+
+                    # Envoyer la notification
+                    channel = bot.get_channel(challenge['channel_id'])
+                    if channel:
+                        remaining_participants = get_challenge_participants(challenge['id'])
+
+                        embed = discord.Embed(color=EMBED_COLOR)
+                        embed.description = f"""▸ **CYCLE ÉCHOUÉ**
+
+**{profile['user_name']}** n'a pas atteint son objectif.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+```
+{format_stat_line("CYCLE", f"{profile['cycle_days']} jours")}
+{format_stat_line("SCORE", f"{count}/{cycle_goal}")}
+{format_stat_line("GAGE", participant['gage'][:20])}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+
+                        if len(remaining_participants) < 2:
+                            c.execute('UPDATE challenge SET is_active = 0 WHERE id = %s', (challenge['id'],))
+                            embed.description += "\n▼ **Le défi est terminé** (moins de 2 participants)."
+                        else:
+                            embed.description += f"\n▼ `/rescue` disponible pendant 24h."
+
+                        embed.set_footer(text="◆ Challenge Bot")
+                        await channel.send(f"<@{user_id}>", embed=embed)
+
+                # Redémarrer le cycle même en cas d'échec (pour le rescue)
+                c.execute('''
+                    UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s
+                ''', (now.strftime('%Y-%m-%dT00:00:00'), user_id))
+
+        except Exception as e:
+            print(f"Erreur check_custom_cycles pour {profile.get('user_name')}: {e}")
+
+    conn.commit()
+    conn.close()
+
+
 @check_weekly_goals.before_loop
 async def before_check():
     await bot.wait_until_ready()
 
 @send_reminders.before_loop
 async def before_reminders():
+    await bot.wait_until_ready()
+
+@check_custom_cycles.before_loop
+async def before_cycles():
     await bot.wait_until_ready()
 
 # ══════════════════════════════════════════════════════════════
