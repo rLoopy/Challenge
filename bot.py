@@ -1085,7 +1085,12 @@ Objectif: {profile['weekly_goal']}x/semaine"""
         return
 
     now = datetime.datetime.now(PARIS_TZ)
-    cycle_start = now.strftime('%Y-%m-%dT00:00:00')
+    # Si après 18h, le cycle commence demain à minuit
+    if now.hour >= 18:
+        start_date = (now + datetime.timedelta(days=1)).strftime('%Y-%m-%dT00:00:00')
+    else:
+        start_date = now.strftime('%Y-%m-%dT00:00:00')
+    cycle_start = start_date
 
     conn = get_db()
     c = conn.cursor()
@@ -1096,10 +1101,11 @@ Objectif: {profile['weekly_goal']}x/semaine"""
     conn.commit()
     conn.close()
 
-    # Compter les sessions déjà faites aujourd'hui
+    # Compter les sessions déjà faites
     current_count, current_goal = get_user_progress(joueur.id)
 
-    cycle_end = now + datetime.timedelta(days=jours)
+    cycle_start_dt = datetime.datetime.fromisoformat(cycle_start).replace(tzinfo=PARIS_TZ)
+    cycle_end = cycle_start_dt + datetime.timedelta(days=jours)
     cycle_end_str = cycle_end.strftime('%d/%m')
 
     embed = discord.Embed(color=EMBED_COLOR)
@@ -1124,7 +1130,7 @@ Objectif: {profile['weekly_goal']}x/semaine"""
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-▼ Cycle démarré maintenant.
+▼ Cycle démarre le {cycle_start_dt.strftime('%d/%m à %H:%M')}.
 ▼ Vérification auto à la fin de chaque cycle.
 ▼ `/setcycle reset:True` pour revenir en semaine."""
 

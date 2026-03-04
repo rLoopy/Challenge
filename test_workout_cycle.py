@@ -397,6 +397,59 @@ def test_cross_week_boundary():
     print("  ✓ OK\n")
 
 
+def test_cycle_start_threshold():
+    """Test: Seuil horaire - après 18h, le cycle démarre le lendemain"""
+    print("=" * 60)
+    print("TEST 10: Seuil horaire pour le début du cycle")
+    print("=" * 60)
+
+    def compute_cycle_start(now):
+        """Reproduit la logique de /setcycle"""
+        if now.hour >= 18:
+            return (now + datetime.timedelta(days=1)).strftime('%Y-%m-%dT00:00:00')
+        else:
+            return now.strftime('%Y-%m-%dT00:00:00')
+
+    # Cas 1: Commande à 10h → démarre aujourd'hui
+    now_morning = datetime.datetime(2026, 3, 1, 10, 0, tzinfo=PARIS_TZ)
+    start = compute_cycle_start(now_morning)
+    assert start == '2026-03-01T00:00:00', f"Expected 01/03, got {start}"
+    print(f"  10h00 → cycle démarre: {start} (aujourd'hui) ✓")
+
+    # Cas 2: Commande à 17h59 → démarre aujourd'hui
+    now_afternoon = datetime.datetime(2026, 3, 1, 17, 59, tzinfo=PARIS_TZ)
+    start = compute_cycle_start(now_afternoon)
+    assert start == '2026-03-01T00:00:00', f"Expected 01/03, got {start}"
+    print(f"  17h59 → cycle démarre: {start} (aujourd'hui) ✓")
+
+    # Cas 3: Commande à 18h → démarre demain
+    now_evening = datetime.datetime(2026, 3, 1, 18, 0, tzinfo=PARIS_TZ)
+    start = compute_cycle_start(now_evening)
+    assert start == '2026-03-02T00:00:00', f"Expected 02/03, got {start}"
+    print(f"  18h00 → cycle démarre: {start} (demain) ✓")
+
+    # Cas 4: Commande à 23h dimanche → démarre lundi
+    now_late = datetime.datetime(2026, 3, 1, 23, 0, tzinfo=PARIS_TZ)
+    start = compute_cycle_start(now_late)
+    assert start == '2026-03-02T00:00:00', f"Expected 02/03, got {start}"
+    print(f"  23h00 dim → cycle démarre: {start} (lundi) ✓")
+
+    # Cas 5: Vérifier que le scénario original (23h dimanche, cycle 9j)
+    # donne bien 9 jours complets à partir de lundi
+    profile = {
+        'cycle_days': 9,
+        'cycle_goal': 7,
+        'cycle_start_date': '2026-03-02T00:00:00',  # lundi
+    }
+    # Mercredi 21h: il devrait rester 6j (fin = 11/03 00:00)
+    now_wed = datetime.datetime(2026, 3, 4, 21, 0, tzinfo=PARIS_TZ)
+    remaining = get_cycle_days_remaining_logic(profile, now_wed)
+    assert remaining == 6, f"Expected 6 days remaining, got {remaining}"
+    print(f"  Cycle lun→mer 21h: {remaining}j restants (au lieu de 5j avant le fix) ✓")
+
+    print("  ✓ OK\n")
+
+
 if __name__ == '__main__':
     print("\n" + "═" * 60)
     print("  TEST DU CYCLE D'ENTRAÎNEMENT: 7 sessions / 9 jours")
@@ -411,6 +464,7 @@ if __name__ == '__main__':
     test_multiple_checkins_same_day()
     test_full_scenario_timeline()
     test_cross_week_boundary()
+    test_cycle_start_threshold()
 
     print("═" * 60)
     print("  TOUS LES TESTS PASSENT ✓")
