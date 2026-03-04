@@ -1138,6 +1138,88 @@ Objectif: {profile['weekly_goal']}x/semaine"""
     await interaction.response.send_message(f"<@{joueur.id}>", embed=embed)
 
 
+@bot.tree.command(name="adjustcycle", description="Ajuster le cycle en cours d'un joueur (+/- jours)")
+@app_commands.describe(
+    joueur="Le joueur à ajuster",
+    jours="Nombre de jours à ajouter ou retirer (ex: +1, -2)"
+)
+async def adjustcycle_cmd(
+    interaction: discord.Interaction,
+    joueur: discord.Member,
+    jours: int
+):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande serveur uniquement.", ephemeral=True)
+        return
+
+    profile = get_or_create_profile(joueur.id, joueur.display_name)
+
+    cycle_days = profile.get('cycle_days') or 7
+    cycle_start = profile.get('cycle_start_date')
+
+    if cycle_days == 7 or not cycle_start:
+        await interaction.response.send_message(
+            f"**{joueur.display_name}** n'a pas de cycle personnalisé en cours.",
+            ephemeral=True
+        )
+        return
+
+    new_cycle_days = cycle_days + jours
+
+    if new_cycle_days < 2 or new_cycle_days > 30:
+        await interaction.response.send_message(
+            f"Le cycle résultant ({new_cycle_days}j) doit être entre 2 et 30 jours.",
+            ephemeral=True
+        )
+        return
+
+    cycle_goal = profile.get('cycle_goal') or profile['weekly_goal']
+    if cycle_goal > new_cycle_days:
+        await interaction.response.send_message(
+            f"L'objectif ({cycle_goal} sessions) dépasserait la durée du cycle ({new_cycle_days}j).",
+            ephemeral=True
+        )
+        return
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('UPDATE profiles SET cycle_days = %s WHERE user_id = %s', (new_cycle_days, joueur.id))
+    conn.commit()
+    conn.close()
+
+    current_count, _ = get_user_progress(joueur.id)
+    updated_profile = {**profile, 'cycle_days': new_cycle_days}
+    days_remaining = get_cycle_days_remaining(updated_profile)
+
+    start_dt = datetime.datetime.fromisoformat(cycle_start)
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=PARIS_TZ)
+    new_end = start_dt + datetime.timedelta(days=new_cycle_days)
+
+    signe = f"+{jours}" if jours > 0 else str(jours)
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **CYCLE AJUSTÉ**
+
+**{joueur.display_name}**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+```
+{format_stat_line("AVANT", f"{cycle_days} jours")}
+{format_stat_line("AJUST.", signe + "j")}
+{format_stat_line("APRÈS", f"{new_cycle_days} jours")}
+{format_stat_line("FIN CYCLE", new_end.strftime('%d/%m'))}
+{format_stat_line("SESSIONS", f"{current_count}/{cycle_goal}")}
+{format_stat_line("RESTANT", f"{days_remaining}j")}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(f"<@{joueur.id}>", embed=embed)
+
+
 @bot.tree.command(name="checkin", description="Enregistrer une session")
 @app_commands.describe(
     photo="Photo de ta session",

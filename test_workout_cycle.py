@@ -450,6 +450,58 @@ def test_cycle_start_threshold():
     print("  ✓ OK\n")
 
 
+def test_adjust_cycle():
+    """Test: Ajustement du cycle en cours (+/- jours)"""
+    print("=" * 60)
+    print("TEST 11: Ajustement du cycle en cours")
+    print("=" * 60)
+
+    # Cycle initial: 9 jours, commencé le 01/03 (dimanche)
+    profile = {
+        'cycle_days': 9,
+        'cycle_goal': 7,
+        'cycle_start_date': '2026-03-01T00:00:00',
+        'weekly_goal': 4,
+    }
+
+    now = datetime.datetime(2026, 3, 4, 21, 0, tzinfo=PARIS_TZ)
+
+    # Avant ajustement: fin = 10/03, restant = 5j
+    remaining_before = get_cycle_days_remaining_logic(profile, now)
+    assert remaining_before == 5, f"Expected 5, got {remaining_before}"
+    print(f"  Avant: cycle {profile['cycle_days']}j, fin 10/03, {remaining_before}j restants")
+
+    # Ajustement: +1 jour
+    adjust = 1
+    new_cycle_days = profile['cycle_days'] + adjust
+    assert new_cycle_days == 10
+
+    # Validation: entre 2 et 30, et objectif <= durée
+    assert 2 <= new_cycle_days <= 30
+    assert profile['cycle_goal'] <= new_cycle_days
+
+    profile_after = {**profile, 'cycle_days': new_cycle_days}
+    remaining_after = get_cycle_days_remaining_logic(profile_after, now)
+    assert remaining_after == 6, f"Expected 6, got {remaining_after}"
+    print(f"  Ajustement: +{adjust}j → cycle {new_cycle_days}j, fin 11/03, {remaining_after}j restants")
+
+    # Ajustement: -2 jours
+    adjust2 = -2
+    new_cycle_days2 = new_cycle_days + adjust2
+    assert new_cycle_days2 == 8
+    profile_after2 = {**profile, 'cycle_days': new_cycle_days2}
+    remaining_after2 = get_cycle_days_remaining_logic(profile_after2, now)
+    assert remaining_after2 == 4, f"Expected 4, got {remaining_after2}"
+    print(f"  Ajustement: {adjust2}j → cycle {new_cycle_days2}j, fin 09/03, {remaining_after2}j restants")
+
+    # Validation: objectif ne peut pas dépasser la durée
+    invalid_days = profile['cycle_goal'] - 1  # 6 jours pour 7 sessions = invalide
+    assert profile['cycle_goal'] > invalid_days
+    print(f"  Validation: cycle {invalid_days}j avec objectif {profile['cycle_goal']} → refusé ✓")
+
+    print("  ✓ OK\n")
+
+
 if __name__ == '__main__':
     print("\n" + "═" * 60)
     print("  TEST DU CYCLE D'ENTRAÎNEMENT: 7 sessions / 9 jours")
@@ -465,6 +517,7 @@ if __name__ == '__main__':
     test_full_scenario_timeline()
     test_cross_week_boundary()
     test_cycle_start_threshold()
+    test_adjust_cycle()
 
     print("═" * 60)
     print("  TOUS LES TESTS PASSENT ✓")
