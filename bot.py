@@ -277,6 +277,27 @@ def init_db():
         )
     ''')
 
+    # Table des plans d'entraînement (rotation de séances)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS workout_plan (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            workout_name TEXT NOT NULL,
+            workout_order INTEGER NOT NULL,
+            is_cardio BOOLEAN DEFAULT FALSE
+        )
+    ''')
+
+    # Migration: ajouter workout_name sur checkins
+    c.execute('''
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='checkins' AND column_name='workout_name') THEN
+                ALTER TABLE checkins ADD COLUMN workout_name TEXT;
+            END IF;
+        END $$;
+    ''')
+
     # Créer les index pour optimiser les requêtes
     c.execute('CREATE INDEX IF NOT EXISTS idx_challenge_guild ON challenge(guild_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_challenge_active ON challenge(is_active)')
@@ -284,6 +305,7 @@ def init_db():
     c.execute('CREATE INDEX IF NOT EXISTS idx_participants_user ON challenge_participants(user_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_checkins_user ON checkins(user_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_checkins_week ON checkins(user_id, week_number, year)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_workout_plan_user ON workout_plan(user_id)')
 
     conn.commit()
     conn.close()
@@ -485,6 +507,184 @@ def get_cycle_label(profile):
 def is_custom_cycle(profile):
     """Vérifie si un utilisateur a un cycle personnalisé"""
     return profile and (profile.get('cycle_days') or 7) != 7
+
+# ── Workout plan helpers ──
+
+def get_workout_plan(user_id):
+    """Récupère le plan d'entraînement d'un utilisateur, trié par ordre"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM workout_plan WHERE user_id = %s ORDER BY workout_order', (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_cycle_workout_status(user_id, profile=None):
+    """Retourne les séances faites dans le cycle en cours (dict workout_name -> count)"""
+    if profile is None:
+        profile = get_profile(user_id)
+
+    cycle_days = (profile.get('cycle_days') or 7) if profile else 7
+
+    conn = get_db()
+    c = conn.cursor()
+
+    if cycle_days == 7:
+        week_number, year = get_week_info()
+        c.execute('''
+            SELECT workout_name, COUNT(*) as count FROM checkins
+            WHERE user_id = %s AND week_number = %s AND year = %s
+            AND workout_name IS NOT NULL
+            GROUP BY workout_name
+        ''', (user_id, week_number, year))
+    else:
+        cycle_start = profile.get('cycle_start_date') if profile else None
+        if not cycle_start:
+            conn.close()
+            return {}
+        start = datetime.datetime.fromisoformat(cycle_start)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=PARIS_TZ)
+        end = start + datetime.timedelta(days=cycle_days)
+        c.execute('''
+            SELECT workout_name, COUNT(*) as count FROM checkins
+            WHERE user_id = %s AND timestamp >= %s AND timestamp < %s
+            AND workout_name IS NOT NULL
+            GROUP BY workout_name
+        ''', (user_id, start.isoformat(), end.isoformat()))
+
+    rows = c.fetchall()
+    conn.close()
+    return {row['workout_name']: row['count'] for row in rows}
+
+def format_rotation_status(plan, done_workouts, highlight=None):
+    """Génère le texte visuel de la rotation"""
+    lines = []
+    for entry in plan:
+        name = entry['workout_name']
+        is_cardio = entry.get('is_cardio', False)
+
+        if is_cardio:
+            # Compter combien de cardio sont dans le plan
+            cardio_total = sum(1 for e in plan if e.get('is_cardio', False))
+            cardio_done = done_workouts.get(name, 0)
+            if name == highlight:
+                lines.append(f"▸ {name} ({cardio_done}/{cardio_total})  ← now")
+            elif cardio_done >= cardio_total:
+                lines.append(f"✓ {name} ({cardio_done}/{cardio_total})")
+            else:
+                lines.append(f"□ {name} ({cardio_done}/{cardio_total})")
+            return "\n".join(lines)  # Cardio est toujours le dernier
+        else:
+            done = done_workouts.get(name, 0) > 0
+            if name == highlight:
+                lines.append(f"▸ {name}  ← now")
+            elif done:
+                lines.append(f"✓ {name}")
+            else:
+                lines.append(f"□ {name}")
+
+    return "\n".join(lines)
+
+def get_remaining_workouts(plan, done_workouts):
+    """Retourne la liste des séances pas encore faites dans le cycle"""
+    remaining = []
+    for entry in plan:
+        name = entry['workout_name']
+        is_cardio = entry.get('is_cardio', False)
+        if is_cardio:
+            cardio_total = sum(1 for e in plan if e.get('is_cardio', False))
+            cardio_done = done_workouts.get(name, 0)
+            if cardio_done < cardio_total:
+                remaining.append(entry)
+        else:
+            if done_workouts.get(name, 0) == 0:
+                remaining.append(entry)
+    return remaining
+
+# ══════════════════════════════════════════════════════════════
+#                       UI VIEWS
+# ══════════════════════════════════════════════════════════════
+
+class WorkoutSelectView(discord.ui.View):
+    """Menu déroulant pour choisir quelle séance on a faite"""
+
+    def __init__(self, checkin_id: int, user_id: int, remaining_workouts: list, plan: list):
+        super().__init__(timeout=300)
+        self.checkin_id = checkin_id
+        self.allowed_user_id = user_id
+        self.plan = plan
+
+        options = []
+        seen_cardio = False
+        for entry in remaining_workouts:
+            if entry.get('is_cardio') and seen_cardio:
+                continue
+            if entry.get('is_cardio'):
+                seen_cardio = True
+            icon = "🏃" if entry.get('is_cardio') else "🏋️"
+            options.append(discord.SelectOption(
+                label=entry['workout_name'],
+                value=entry['workout_name'],
+                emoji=icon
+            ))
+
+        if not options:
+            return
+
+        select = discord.ui.Select(
+            placeholder="Quelle séance ?",
+            options=options,
+            min_values=1,
+            max_values=1
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.allowed_user_id:
+            await interaction.response.send_message("Ce menu n'est pas pour toi.", ephemeral=True)
+            return False
+        return True
+
+    async def on_select(self, interaction: discord.Interaction):
+        selected = interaction.data['values'][0]
+
+        # Déterminer le session_type à partir du plan
+        is_cardio = any(
+            e['workout_name'] == selected and e.get('is_cardio')
+            for e in self.plan
+        )
+        new_session_type = 'cardio' if is_cardio else 'gym'
+
+        # Mettre à jour le check-in en DB
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('''
+            UPDATE checkins SET workout_name = %s, session_type = %s WHERE id = %s
+        ''', (selected, new_session_type, self.checkin_id))
+        conn.commit()
+        conn.close()
+
+        # Recalculer le statut de la rotation
+        profile = get_profile(self.allowed_user_id)
+        done = get_cycle_workout_status(self.allowed_user_id, profile)
+        rotation_text = format_rotation_status(self.plan, done, highlight=selected)
+
+        # Éditer le message pour ajouter la rotation
+        original_embed = interaction.message.embeds[0] if interaction.message.embeds else None
+        if original_embed:
+            desc = original_embed.description or ""
+            desc += f"\n\n◆ **ROTATION**\n```\n{rotation_text}\n```"
+            original_embed.description = desc
+            await interaction.response.edit_message(embed=original_embed, view=None)
+        else:
+            await interaction.response.edit_message(view=None)
+
+        self.stop()
+
+    async def on_timeout(self):
+        pass
 
 # ══════════════════════════════════════════════════════════════
 #                       BOT EVENTS
@@ -1029,6 +1229,138 @@ async def setgoal_cmd(
     await interaction.response.send_message(f"<@{joueur.id}>", embed=embed)
 
 
+@bot.tree.command(name="setworkouts", description="Définir ta rotation de séances")
+@app_commands.describe(
+    plan="Séances muscu séparées par des virgules (ex: Pecs/Bi, EP/Tri, Dos/Bras, Legs, Fonctionnelle)",
+    cardio="Nombre de séances cardio par cycle (défaut: 0)",
+    supprimer="Supprimer ton plan de rotation"
+)
+async def setworkouts_cmd(
+    interaction: discord.Interaction,
+    plan: Optional[str] = None,
+    cardio: Optional[int] = 0,
+    supprimer: Optional[bool] = False
+):
+    user_id = interaction.user.id
+
+    if supprimer:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('DELETE FROM workout_plan WHERE user_id = %s', (user_id,))
+        conn.commit()
+        conn.close()
+
+        embed = discord.Embed(color=EMBED_COLOR)
+        embed.description = "▸ **PLAN SUPPRIMÉ**\n\nTa rotation de séances a été supprimée."
+        embed.set_footer(text="◆ Challenge Bot")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Si pas de plan fourni, afficher le plan actuel
+    if plan is None:
+        existing = get_workout_plan(user_id)
+        if not existing:
+            await interaction.response.send_message(
+                "Tu n'as pas de plan. Crée-en un avec:\n`/setworkouts plan:\"Pecs/Bi, EP/Tri, Dos/Bras, Legs, Fonctionnelle\" cardio:2`",
+                ephemeral=True
+            )
+            return
+
+        plan_text = ""
+        for entry in existing:
+            icon = "🏃" if entry.get('is_cardio') else "🏋️"
+            plan_text += f"{icon} {entry['workout_name']}\n"
+
+        # Afficher aussi le statut du cycle en cours
+        profile = get_or_create_profile(user_id, interaction.user.display_name)
+        done = get_cycle_workout_status(user_id, profile)
+        rotation_text = format_rotation_status(existing, done)
+
+        embed = discord.Embed(color=EMBED_COLOR)
+        embed.description = f"""▸ **TON PLAN**
+
+◆ **SÉANCES**
+```
+{plan_text.strip()}
+```
+
+◆ **{get_cycle_label(profile)}**
+```
+{rotation_text}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▼ Modifier: `/setworkouts plan:\"...\" cardio:X`
+▼ Supprimer: `/setworkouts supprimer:True`"""
+        embed.set_footer(text="◆ Challenge Bot")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Parser le plan
+    workouts = [w.strip() for w in plan.split(',') if w.strip()]
+
+    if not workouts:
+        await interaction.response.send_message("Plan vide. Sépare les séances par des virgules.", ephemeral=True)
+        return
+
+    if len(workouts) > 10:
+        await interaction.response.send_message("Maximum 10 séances muscu.", ephemeral=True)
+        return
+
+    cardio_count = max(0, min(cardio or 0, 7))
+
+    # Remplacer le plan existant
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('DELETE FROM workout_plan WHERE user_id = %s', (user_id,))
+
+    order = 1
+    for workout in workouts:
+        c.execute('''
+            INSERT INTO workout_plan (user_id, workout_name, workout_order, is_cardio)
+            VALUES (%s, %s, %s, FALSE)
+        ''', (user_id, workout, order))
+        order += 1
+
+    # Ajouter les slots cardio
+    if cardio_count > 0:
+        for _ in range(cardio_count):
+            c.execute('''
+                INSERT INTO workout_plan (user_id, workout_name, workout_order, is_cardio)
+                VALUES (%s, %s, %s, TRUE)
+            ''', (user_id, "Cardio", order))
+            order += 1
+
+    conn.commit()
+    conn.close()
+
+    # Construire l'affichage
+    plan_text = ""
+    for w in workouts:
+        plan_text += f"🏋️ {w}\n"
+    if cardio_count > 0:
+        plan_text += f"🏃 Cardio x{cardio_count}\n"
+
+    total = len(workouts) + cardio_count
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **PLAN CONFIGURÉ**
+
+◆ **ROTATION** ({total} séances)
+```
+{plan_text.strip()}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▼ Après chaque check-in, un menu te proposera tes séances.
+▼ Modifier: `/setworkouts plan:\"...\" cardio:X`"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="setcycle", description="Passer un joueur en cycle personnalisé (ex: 7 sessions sur 9 jours)")
 @app_commands.describe(
     joueur="Le joueur à configurer",
@@ -1263,7 +1595,9 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
     c.execute('''
         INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
     ''', (user_id, timestamp, week_number, year, photo.url, note, session_type))
+    checkin_id = c.fetchone()['id']
 
     conn.commit()
     conn.close()
@@ -1342,9 +1676,18 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
 
+    # Préparer le menu de workout si l'utilisateur a un plan
+    workout_view = None
+    workout_plan = get_workout_plan(user_id)
+    if workout_plan:
+        done_workouts = get_cycle_workout_status(user_id, profile)
+        remaining = get_remaining_workouts(workout_plan, done_workouts)
+        if remaining:
+            workout_view = WorkoutSelectView(checkin_id, user_id, remaining, workout_plan)
+
     # Répondre à l'interaction (après defer)
     ping_content = " ".join([f"<@{pid}>" for pid in ping_ids]) if ping_ids else None
-    await interaction.followup.send(content=ping_content, embed=embed)
+    await interaction.followup.send(content=ping_content, embed=embed, view=workout_view)
 
     # Cross-poster sur les autres serveurs (après avoir répondu)
     cross_post_success = 0
@@ -1486,7 +1829,9 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     c.execute('''
         INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
     ''', (user_id, timestamp, week_number, year, photo.url, late_note, session_type))
+    checkin_id = c.fetchone()['id']
 
     conn.commit()
     conn.close()
@@ -1566,8 +1911,17 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
 
+    # Préparer le menu de workout
+    workout_view = None
+    workout_plan = get_workout_plan(user_id)
+    if workout_plan:
+        done_workouts = get_cycle_workout_status(user_id, profile)
+        remaining = get_remaining_workouts(workout_plan, done_workouts)
+        if remaining:
+            workout_view = WorkoutSelectView(checkin_id, user_id, remaining, workout_plan)
+
     ping_content = " ".join([f"<@{pid}>" for pid in ping_ids]) if ping_ids else None
-    await interaction.followup.send(content=ping_content, embed=embed)
+    await interaction.followup.send(content=ping_content, embed=embed, view=workout_view)
 
     # Cross-poster sur les autres serveurs
     cross_post_success = 0
@@ -1686,7 +2040,9 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
     c.execute('''
         INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
     ''', (user_id, timestamp, week_number, year, None, checkin_note, session_type))
+    checkin_id = c.fetchone()['id']
 
     conn.commit()
     conn.close()
@@ -1763,9 +2119,18 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
     if other_challenges:
         embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
 
+    # Préparer le menu de workout (pour le membre, pas l'auteur)
+    workout_view = None
+    workout_plan_member = get_workout_plan(user_id)
+    if workout_plan_member:
+        done_workouts = get_cycle_workout_status(user_id, profile)
+        remaining = get_remaining_workouts(workout_plan_member, done_workouts)
+        if remaining:
+            workout_view = WorkoutSelectView(checkin_id, user_id, remaining, workout_plan_member)
+
     # Ping le membre + les autres participants
     ping_content = f"{membre.mention} " + " ".join([f"<@{pid}>" for pid in ping_ids])
-    await interaction.followup.send(content=ping_content.strip(), embed=embed)
+    await interaction.followup.send(content=ping_content.strip(), embed=embed, view=workout_view)
 
     # Cross-poster sur les autres serveurs
     cross_post_success = 0
@@ -2465,6 +2830,7 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 /removeplayer— Retirer un joueur
 /setgoal     — Changer l'objectif d'un joueur
 /setcycle    — Cycle perso (ex: 7x/9j)
+/setworkouts — Rotation de séances
 /setchannel  — Salon des check-ins
 /checkin     — Session + photo
 /latecheckin — Session d'HIER
