@@ -2965,18 +2965,17 @@ async def reset_cmd(interaction: discord.Interaction):
         async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
             conn = get_db()
             c = conn.cursor()
-            c.execute('DELETE FROM checkins')
             c.execute('DELETE FROM history')
             c.execute('DELETE FROM challenge_participants')
             c.execute('DELETE FROM challenge')
-            c.execute('DELETE FROM profiles')
             conn.commit()
             conn.close()
 
             embed = discord.Embed(color=EMBED_COLOR)
             embed.description = """▸ **RESET EFFECTUÉ**
 
-Toutes les données ont été supprimées."""
+Défis, participants et historique de défis supprimés.
+Check-ins et profils préservés."""
 
             await interaction.response.edit_message(embed=embed, view=None)
             self.stop()
@@ -2989,11 +2988,12 @@ Toutes les données ont été supprimées."""
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = """▸ **ATTENTION**
 
-Cette action va supprimer **TOUTES** les données :
+Cette action va supprimer :
 • Défis
-• Check-ins
-• Historique
+• Participants
+• Historique de défis
 
+**Préservé** : check-ins + profils.
 **Irréversible.**"""
 
     await interaction.response.send_message(embed=embed, view=ConfirmReset(), ephemeral=True)
