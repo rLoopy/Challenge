@@ -307,6 +307,9 @@ def init_db():
     c.execute('CREATE INDEX IF NOT EXISTS idx_checkins_week ON checkins(user_id, week_number, year)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_workout_plan_user ON workout_plan(user_id)')
 
+    # One-time fix: cycle_days was set to 10 instead of 9 by old /adjustcycle bug
+    c.execute('UPDATE profiles SET cycle_days = 9 WHERE user_id = 265556280033148929 AND cycle_days = 10')
+
     conn.commit()
     conn.close()
     print("✅ Base de données PostgreSQL initialisée")
