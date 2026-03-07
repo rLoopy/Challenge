@@ -307,8 +307,9 @@ def init_db():
     c.execute('CREATE INDEX IF NOT EXISTS idx_checkins_week ON checkins(user_id, week_number, year)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_workout_plan_user ON workout_plan(user_id)')
 
-    # One-time fix: cycle_days was set to 10 instead of 9 by old /adjustcycle bug
-    c.execute('UPDATE profiles SET cycle_days = 9 WHERE user_id = 265556280033148929 AND cycle_days = 10')
+    # One-time fix: cycle_days 10→9 + cycle_start_date 01/03→02/03 (old /adjustcycle bug)
+    c.execute('''UPDATE profiles SET cycle_days = 9, cycle_start_date = '2026-03-02T00:00:00'
+                 WHERE user_id = 265556280033148929 AND (cycle_days = 10 OR cycle_start_date = '2026-03-01T00:00:00')''')
 
     conn.commit()
     conn.close()
@@ -2943,11 +2944,22 @@ Track ton sport. Défie tes potes. Pas d'excuses.
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+ADMIN_USER_ID = 265556280033148929
+
 @bot.tree.command(name="reset", description="Réinitialiser les données (admin)")
 async def reset_cmd(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_USER_ID:
+        await interaction.response.send_message("Seul l'administrateur du bot peut utiliser cette commande.", ephemeral=True)
+        return
+
+    invoker_id = interaction.user.id
+
     class ConfirmReset(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=30)
+
+        async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            return interaction.user.id == invoker_id
 
         @discord.ui.button(label="Confirmer", style=discord.ButtonStyle.danger)
         async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3466,11 +3478,11 @@ async def check_weekly_goals():
     iso = yesterday.isocalendar()
     week_number, year = iso[1], iso[0]
 
-    conn = get_db()
-    c = conn.cursor()
-
     for challenge in challenges:
         try:
+            conn = get_db()
+            c = conn.cursor()
+
             # Vérifier si c'est la première semaine du défi
             start_week = challenge.get('week_number', 0)
             if start_week == week_number:
@@ -3478,17 +3490,21 @@ async def check_weekly_goals():
                 if start_date_str:
                     start_date = datetime.datetime.fromisoformat(start_date_str)
                     if start_date.weekday() != 0:
-                        continue  # Pas créé un lundi → ignorer cette semaine
+                        conn.close()
+                        continue
                 else:
+                    conn.close()
                     continue
 
             # Récupérer tous les participants
             participants = get_challenge_participants(challenge['id'])
             if not participants:
+                conn.close()
                 continue
 
             channel = bot.get_channel(challenge['channel_id'])
             if not channel:
+                conn.close()
                 continue
 
             total_weeks = challenge.get('total_weeks', 0)
@@ -3534,24 +3550,20 @@ async def check_weekly_goals():
                         'goal': goal,
                         'frozen': frozen
                     })
-                    # Incrémenter le streak des participants qui ont réussi
                     new_streak = p.get('streak', 0) + 1
                     c.execute('UPDATE challenge_participants SET streak = %s WHERE id = %s', (new_streak, p['id']))
 
             # Si des participants ont échoué
             if failed_participants:
-                # Retirer les participants qui ont échoué
                 for fp in failed_participants:
                     c.execute('DELETE FROM challenge_participants WHERE challenge_id = %s AND user_id = %s',
                               (challenge['id'], fp['user_id']))
 
-                    # Enregistrer dans l'historique
                     c.execute('''
                         INSERT INTO history (challenge_id, guild_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
                         VALUES (%s, %s, NULL, NULL, %s, %s, %s, %s, %s, %s)
                     ''', (challenge['id'], challenge['guild_id'], fp['user_id'], fp['user_name'], fp['gage'], now.isoformat(), 'Objectif non atteint', total_weeks))
 
-                # Construire l'embed pour les échecs
                 embed = discord.Embed(color=EMBED_COLOR)
 
                 failed_text = ""
@@ -3574,11 +3586,9 @@ async def check_weekly_goals():
 ```
 """
 
-                # Vérifier combien de participants restent
                 remaining = len(success_participants)
 
                 if remaining < 2:
-                    # Pas assez de participants, fin du défi
                     c.execute('UPDATE challenge SET is_active = 0 WHERE id = %s', (challenge['id'],))
 
                     embed.description = f"""▸ **GAME OVER**
@@ -3602,19 +3612,18 @@ Toujours en course ({remaining} participants) :
 
 ▼ **Le défi continue.**"""
 
-                    # Incrémenter total_weeks
                     c.execute('UPDATE challenge SET total_weeks = %s, week_number = %s WHERE id = %s',
                               (total_weeks + 1, week_number + 1, challenge['id']))
 
                 embed.set_footer(text=f"◆ Challenge Bot • Semaine {challenge_week}")
 
-                # Ping tous les participants (actuels et éliminés)
                 all_ids = [fp['user_id'] for fp in failed_participants] + [sp['user_id'] for sp in success_participants]
                 ping_content = " ".join([f"<@{uid}>" for uid in all_ids])
+
+                conn.commit()
                 await channel.send(content=ping_content, embed=embed)
 
             else:
-                # Tout le monde a réussi !
                 c.execute('UPDATE challenge SET total_weeks = %s, week_number = %s WHERE id = %s',
                           (total_weeks + 1, week_number + 1, challenge['id']))
 
@@ -3638,13 +3647,17 @@ Tout le monde a réussi !
 ▼ **Le défi continue.**"""
 
                 embed.set_footer(text=f"◆ Challenge Bot • Semaine {challenge_week + 1}")
+
+                conn.commit()
                 await channel.send(embed=embed)
 
         except Exception as e:
             print(f"Erreur check_weekly_goals pour challenge {challenge.get('id')}: {e}")
-
-    conn.commit()
-    conn.close()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 @tasks.loop(hours=12)
@@ -3738,6 +3751,7 @@ async def check_custom_cycles():
         AND cycle_start_date IS NOT NULL
     ''')
     cycle_profiles = c.fetchall()
+    conn.close()
 
     for profile in cycle_profiles:
         try:
@@ -3747,7 +3761,6 @@ async def check_custom_cycles():
 
             cycle_end = cycle_start + datetime.timedelta(days=profile['cycle_days'])
 
-            # Le cycle n'est pas encore terminé
             if now < cycle_end:
                 continue
 
@@ -3755,14 +3768,17 @@ async def check_custom_cycles():
             cycle_goal = profile.get('cycle_goal') or profile['weekly_goal']
             count = get_checkins_for_user_cycle(user_id, profile['cycle_start_date'], profile['cycle_days'])
 
+            conn = get_db()
+            c = conn.cursor()
+
             if count >= cycle_goal:
-                # Cycle réussi → démarrer un nouveau cycle
                 c.execute('''
                     UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s
                 ''', (now.strftime('%Y-%m-%dT00:00:00'), user_id))
+                conn.commit()
+                conn.close()
                 print(f"Cycle réussi pour {profile['user_name']}: {count}/{cycle_goal}, nouveau cycle démarré")
             else:
-                # Cycle échoué → éliminer de tous les défis actifs
                 challenges = get_user_active_challenges(user_id)
                 for challenge in challenges:
                     participant = get_participant(challenge['id'], user_id)
@@ -3773,7 +3789,6 @@ async def check_custom_cycles():
                     if frozen:
                         continue
 
-                    # Retirer le participant
                     c.execute('DELETE FROM challenge_participants WHERE challenge_id = %s AND user_id = %s',
                               (challenge['id'], user_id))
 
@@ -3784,7 +3799,6 @@ async def check_custom_cycles():
                     ''', (challenge['id'], challenge['guild_id'], user_id, profile['user_name'],
                           participant['gage'], now.isoformat(), f'Cycle {profile["cycle_days"]}j non atteint ({count}/{cycle_goal})', total_weeks))
 
-                    # Envoyer la notification
                     channel = bot.get_channel(challenge['channel_id'])
                     if channel:
                         remaining_participants = get_challenge_participants(challenge['id'])
@@ -3813,16 +3827,18 @@ async def check_custom_cycles():
                         embed.set_footer(text="◆ Challenge Bot")
                         await channel.send(f"<@{user_id}>", embed=embed)
 
-                # Redémarrer le cycle même en cas d'échec (pour le rescue)
                 c.execute('''
                     UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s
                 ''', (now.strftime('%Y-%m-%dT00:00:00'), user_id))
+                conn.commit()
+                conn.close()
 
         except Exception as e:
             print(f"Erreur check_custom_cycles pour {profile.get('user_name')}: {e}")
-
-    conn.commit()
-    conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 @check_weekly_goals.before_loop
