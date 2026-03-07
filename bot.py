@@ -1496,37 +1496,27 @@ async def adjustcycle_cmd(
         )
         return
 
-    new_cycle_days = cycle_days + jours
+    start_dt = datetime.datetime.fromisoformat(cycle_start)
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=PARIS_TZ)
 
-    if new_cycle_days < 2 or new_cycle_days > 30:
-        await interaction.response.send_message(
-            f"Le cycle résultant ({new_cycle_days}j) doit être entre 2 et 30 jours.",
-            ephemeral=True
-        )
-        return
+    # Reculer le start_date pour étendre le cycle (ne touche PAS cycle_days)
+    new_start = start_dt - datetime.timedelta(days=jours)
+    new_end = new_start + datetime.timedelta(days=cycle_days)
+    old_end = start_dt + datetime.timedelta(days=cycle_days)
 
     cycle_goal = profile.get('cycle_goal') or profile['weekly_goal']
-    if cycle_goal > new_cycle_days:
-        await interaction.response.send_message(
-            f"L'objectif ({cycle_goal} sessions) dépasserait la durée du cycle ({new_cycle_days}j).",
-            ephemeral=True
-        )
-        return
 
     conn = get_db()
     c = conn.cursor()
-    c.execute('UPDATE profiles SET cycle_days = %s WHERE user_id = %s', (new_cycle_days, joueur.id))
+    c.execute('UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s',
+              (new_start.isoformat(), joueur.id))
     conn.commit()
     conn.close()
 
     current_count, _ = get_user_progress(joueur.id)
-    updated_profile = {**profile, 'cycle_days': new_cycle_days}
+    updated_profile = {**profile, 'cycle_start_date': new_start.isoformat()}
     days_remaining = get_cycle_days_remaining(updated_profile)
-
-    start_dt = datetime.datetime.fromisoformat(cycle_start)
-    if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=PARIS_TZ)
-    new_end = start_dt + datetime.timedelta(days=new_cycle_days)
 
     signe = f"+{jours}" if jours > 0 else str(jours)
 
@@ -1538,18 +1528,103 @@ async def adjustcycle_cmd(
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ```
-{format_stat_line("AVANT", f"{cycle_days} jours")}
+{format_stat_line("FIN AVANT", old_end.strftime('%d/%m'))}
 {format_stat_line("AJUST.", signe + "j")}
-{format_stat_line("APRÈS", f"{new_cycle_days} jours")}
-{format_stat_line("FIN CYCLE", new_end.strftime('%d/%m'))}
+{format_stat_line("FIN APRÈS", new_end.strftime('%d/%m'))}
+{format_stat_line("CYCLE", f"{cycle_days}j (inchangé)")}
 {format_stat_line("SESSIONS", f"{current_count}/{cycle_goal}")}
 {format_stat_line("RESTANT", f"{days_remaining}j")}
 ```
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▼ Seul ce cycle est affecté. Les prochains seront de {cycle_days}j."""
 
     embed.set_footer(text="◆ Challenge Bot")
     await interaction.response.send_message(f"<@{joueur.id}>", embed=embed)
+
+
+@bot.tree.command(name="cycleinfo", description="Afficher les détails de ton cycle en cours")
+async def cycleinfo_cmd(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("Commande serveur uniquement.", ephemeral=True)
+        return
+
+    user_id = interaction.user.id
+    profile = get_or_create_profile(user_id, interaction.user.display_name)
+
+    if not is_custom_cycle(profile):
+        week_number, year = get_week_info()
+        count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
+        goal = profile['weekly_goal']
+        days_left = get_days_remaining()
+
+        now = datetime.datetime.now(PARIS_TZ)
+        monday = now - datetime.timedelta(days=now.weekday())
+        sunday = monday + datetime.timedelta(days=6)
+
+        embed = discord.Embed(color=EMBED_COLOR)
+        embed.description = f"""▸ **INFOS CYCLE** — {interaction.user.display_name}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+```
+{format_stat_line("MODE", "Semaine standard")}
+{format_stat_line("PÉRIODE", f"{monday.strftime('%d/%m')} → {sunday.strftime('%d/%m')}")}
+{format_stat_line("OBJECTIF", f"{goal} sessions / 7j")}
+{format_stat_line("SESSIONS", f"{count}/{goal}")}
+{format_stat_line("RESTANT", f"{days_left}j")}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+        embed.set_footer(text="◆ Challenge Bot")
+        await interaction.response.send_message(embed=embed)
+        return
+
+    cycle_days = profile.get('cycle_days') or 7
+    cycle_goal = profile.get('cycle_goal') or profile['weekly_goal']
+    cycle_start = profile.get('cycle_start_date')
+
+    start_dt = datetime.datetime.fromisoformat(cycle_start)
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=PARIS_TZ)
+    end_dt = start_dt + datetime.timedelta(days=cycle_days)
+
+    now = datetime.datetime.now(PARIS_TZ)
+    elapsed = (now - start_dt).days
+    remaining = max(0, (end_dt - now).days)
+
+    count, _ = get_user_progress(user_id, profile)
+
+    sessions_left = max(0, cycle_goal - count)
+    status = "✓ Objectif atteint !" if count >= cycle_goal else f"{sessions_left} session(s) à faire"
+
+    plan = get_workout_plan(user_id)
+    rotation_text = ""
+    if plan:
+        done_workouts = get_cycle_workout_status(user_id, profile)
+        rotation_text = f"\n\n▸ **ROTATION**\n```\n{format_rotation_status(plan, done_workouts)}\n```"
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **INFOS CYCLE** — {interaction.user.display_name}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+```
+{format_stat_line("MODE", f"Cycle perso ({cycle_days}j)")}
+{format_stat_line("DÉBUT", start_dt.strftime('%d/%m/%Y %Hh%M'))}
+{format_stat_line("FIN", end_dt.strftime('%d/%m/%Y %Hh%M'))}
+{format_stat_line("ÉCOULÉS", f"{elapsed}j")}
+{format_stat_line("RESTANT", f"{remaining}j")}
+{format_stat_line("OBJECTIF", f"{cycle_goal} sessions")}
+{format_stat_line("SESSIONS", f"{count}/{cycle_goal}")}
+{format_stat_line("STATUT", status)}
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━{rotation_text}"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="checkin", description="Enregistrer une session")
@@ -2831,6 +2906,8 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 /setgoal     — Changer l'objectif d'un joueur
 /setcycle    — Cycle perso (ex: 7x/9j)
 /setworkouts — Rotation de séances
+/adjustcycle — Ajuster cycle (+/- jours)
+/cycleinfo   — Détails du cycle en cours
 /setchannel  — Salon des check-ins
 /checkin     — Session + photo
 /latecheckin — Session d'HIER
