@@ -1766,7 +1766,10 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
 
     # Répondre à l'interaction (après defer)
     ping_content = " ".join([f"<@{pid}>" for pid in ping_ids]) if ping_ids else None
-    await interaction.followup.send(content=ping_content, embed=embed, view=workout_view)
+    send_kwargs = {"content": ping_content, "embed": embed}
+    if workout_view is not None:
+        send_kwargs["view"] = workout_view
+    await interaction.followup.send(**send_kwargs)
 
     # Cross-poster sur les autres serveurs (après avoir répondu)
     cross_post_success = 0
@@ -2000,7 +2003,10 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             workout_view = WorkoutSelectView(checkin_id, user_id, remaining, workout_plan)
 
     ping_content = " ".join([f"<@{pid}>" for pid in ping_ids]) if ping_ids else None
-    await interaction.followup.send(content=ping_content, embed=embed, view=workout_view)
+    send_kwargs = {"content": ping_content, "embed": embed}
+    if workout_view is not None:
+        send_kwargs["view"] = workout_view
+    await interaction.followup.send(**send_kwargs)
 
     # Cross-poster sur les autres serveurs
     cross_post_success = 0
