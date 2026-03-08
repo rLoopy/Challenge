@@ -1605,7 +1605,13 @@ async def cycleinfo_cmd(interaction: discord.Interaction):
 
     now = datetime.datetime.now(PARIS_TZ)
     elapsed = (now - start_dt).days
-    remaining = max(0, (end_dt - now).days)
+    remaining_td = end_dt - now
+    if remaining_td.total_seconds() <= 0:
+        remaining_days, remaining_hours = 0, 0
+    else:
+        total_hours = remaining_td.total_seconds() / 3600
+        remaining_days = int(total_hours // 24)
+        remaining_hours = int(total_hours % 24)
 
     count, _ = get_user_progress(user_id, profile)
 
@@ -1628,7 +1634,7 @@ async def cycleinfo_cmd(interaction: discord.Interaction):
 {format_stat_line("DÉBUT", start_dt.strftime('%d/%m/%Y %Hh%M'))}
 {format_stat_line("FIN", end_dt.strftime('%d/%m/%Y %Hh%M'))}
 {format_stat_line("ÉCOULÉS", f"{elapsed}j")}
-{format_stat_line("RESTANT", f"{remaining}j")}
+{format_stat_line("RESTANT", f"{remaining_days}j {remaining_hours}h")}
 {format_stat_line("OBJECTIF", f"{cycle_goal} sessions")}
 {format_stat_line("SESSIONS", f"{count}/{cycle_goal}")}
 {format_stat_line("STATUT", status)}
