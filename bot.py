@@ -487,19 +487,28 @@ def get_user_progress(user_id, profile=None):
         return count, cycle_goal
 
 def get_cycle_days_remaining(profile):
-    """Retourne les jours restants dans le cycle d'un utilisateur"""
+    """Retourne (jours, heures) restants dans le cycle d'un utilisateur"""
     cycle_days = (profile.get('cycle_days') or 7) if profile else 7
-    if cycle_days == 7:
-        return get_days_remaining()
-    cycle_start = profile.get('cycle_start_date')
-    if not cycle_start:
-        return cycle_days
-    start = datetime.datetime.fromisoformat(cycle_start)
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=PARIS_TZ)
-    end = start + datetime.timedelta(days=cycle_days)
     now = datetime.datetime.now(PARIS_TZ)
-    return max(0, (end - now).days)
+    if cycle_days == 7:
+        # Fin de semaine = dimanche 23h59
+        days_until_sunday = 6 - now.weekday()
+        end = now.replace(hour=23, minute=59, second=59) + datetime.timedelta(days=days_until_sunday)
+    else:
+        cycle_start = profile.get('cycle_start_date')
+        if not cycle_start:
+            return cycle_days, 0
+        start = datetime.datetime.fromisoformat(cycle_start)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=PARIS_TZ)
+        end = start + datetime.timedelta(days=cycle_days)
+    remaining = end - now
+    if remaining.total_seconds() <= 0:
+        return 0, 0
+    total_hours = remaining.total_seconds() / 3600
+    d = int(total_hours // 24)
+    h = int(total_hours % 24)
+    return d, h
 
 def get_cycle_label(profile):
     """Retourne le label du cycle (SEMAINE ou CYCLE Xj)"""
@@ -1683,7 +1692,7 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
 
     user_count, user_goal = get_user_progress(user_id, profile)
     user_activity = profile['activity']
-    days = get_cycle_days_remaining(profile)
+    days, hours = get_cycle_days_remaining(profile)
 
     # Statut
     if user_count >= user_goal:
@@ -1721,9 +1730,9 @@ async def checkin(interaction: discord.Interaction, photo: discord.Attachment, t
     # Deadline adaptée au type de cycle
     if is_custom_cycle(profile):
         cd = profile.get('cycle_days', 7)
-        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('CYCLE', f'{cd}j')}"
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j {hours}h')}\n{format_stat_line('CYCLE', f'{cd}j')}"
     else:
-        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j {hours}h')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
@@ -1920,7 +1929,7 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
 
     user_count, user_goal = get_user_progress(user_id, profile)
     user_activity = profile['activity']
-    days = get_cycle_days_remaining(profile)
+    days, hours = get_cycle_days_remaining(profile)
 
     # Statut
     if user_count >= user_goal:
@@ -1958,9 +1967,9 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
 
     if is_custom_cycle(profile):
         cd = profile.get('cycle_days', 7)
-        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('CYCLE', f'{cd}j')}"
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j {hours}h')}\n{format_stat_line('CYCLE', f'{cd}j')}"
     else:
-        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j {hours}h')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}** (hier {yesterday_str})
@@ -2134,7 +2143,7 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
 
     user_count, user_goal = get_user_progress(user_id, profile)
     user_activity = profile['activity']
-    days = get_cycle_days_remaining(profile)
+    days, hours = get_cycle_days_remaining(profile)
 
     # Statut
     if user_count >= user_goal:
@@ -2170,9 +2179,9 @@ async def checkinfor(interaction: discord.Interaction, membre: discord.Member, t
 
     if is_custom_cycle(profile):
         cd = profile.get('cycle_days', 7)
-        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('CYCLE', f'{cd}j')}"
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j {hours}h')}\n{format_stat_line('CYCLE', f'{cd}j')}"
     else:
-        deadline_text = f"{format_stat_line('JOURS', f'{days}j')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j {hours}h')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
 
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"""{status_emoji} **{status.upper()}**
