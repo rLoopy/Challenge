@@ -1311,7 +1311,7 @@ async def setworkouts_cmd(
         return
 
     # Parser le plan
-    workouts = [w.strip() for w in plan.split(',') if w.strip()]
+    workouts = [w.strip().strip('"').strip("'") for w in plan.split(',') if w.strip()]
 
     if not workouts:
         await interaction.response.send_message("Plan vide. Sépare les séances par des virgules.", ephemeral=True)
