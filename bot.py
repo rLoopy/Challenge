@@ -717,6 +717,7 @@ async def on_ready():
     check_weekly_goals.start()
     send_reminders.start()
     check_custom_cycles.start()
+    send_custom_cycle_reminders.start()
 
 # ══════════════════════════════════════════════════════════════
 #                       COMMANDS
@@ -3731,6 +3732,11 @@ async def send_reminders():
 
             for p in participants:
                 profile = get_profile(p['user_id'])
+
+                # Skip les utilisateurs avec cycle custom — ils ont leur propre deadline
+                if is_custom_cycle(profile):
+                    continue
+
                 count, goal = get_user_progress(p['user_id'], profile)
                 frozen = p.get('is_frozen', 0)
 
@@ -3862,6 +3868,64 @@ async def check_custom_cycles():
                 pass
 
 
+@tasks.loop(hours=12)
+async def send_custom_cycle_reminders():
+    """Rappels pour les utilisateurs avec cycle custom quand il reste 24-48h"""
+    now = datetime.datetime.now(PARIS_TZ)
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        SELECT * FROM profiles
+        WHERE cycle_days IS NOT NULL AND cycle_days != 7
+        AND cycle_start_date IS NOT NULL
+    ''')
+    cycle_profiles = c.fetchall()
+    conn.close()
+
+    for profile in cycle_profiles:
+        try:
+            user_id = int(profile['user_id'])
+            cycle_start = datetime.datetime.fromisoformat(profile['cycle_start_date'])
+            if cycle_start.tzinfo is None:
+                cycle_start = cycle_start.replace(tzinfo=PARIS_TZ)
+
+            cycle_end = cycle_start + datetime.timedelta(days=profile['cycle_days'])
+            remaining_td = cycle_end - now
+            remaining_hours = remaining_td.total_seconds() / 3600
+
+            # Rappel seulement si entre 24h et 48h restantes
+            if remaining_hours < 24 or remaining_hours > 48:
+                continue
+
+            cycle_goal = profile.get('cycle_goal') or profile['weekly_goal']
+            count = get_checkins_for_user_cycle(user_id, profile['cycle_start_date'], profile['cycle_days'])
+            sessions_left = max(0, cycle_goal - count)
+
+            if sessions_left <= 0:
+                continue
+
+            # Trouver un channel où envoyer le rappel
+            challenges = get_user_active_challenges(user_id)
+            for challenge in challenges:
+                channel_id = challenge.get('checkin_channel_id') or challenge['channel_id']
+                channel = bot.get_channel(channel_id)
+                if not channel:
+                    continue
+
+                days_r = int(remaining_hours // 24)
+                hours_r = int(remaining_hours % 24)
+
+                embed = discord.Embed(color=EMBED_COLOR)
+                embed.description = f"▸ **RAPPEL CYCLE**\n\n<@{user_id}> — **{sessions_left}** session(s) restante(s)\n\n**{days_r}j {hours_r}h** avant la fin de ton cycle."
+                embed.set_footer(text="◆ Challenge Bot")
+                await channel.send(content=f"<@{user_id}>", embed=embed)
+                break  # Un seul rappel par utilisateur
+
+        except Exception as e:
+            print(f"Erreur send_custom_cycle_reminders pour {profile.get('user_name')}: {e}")
+
+
 @check_weekly_goals.before_loop
 async def before_check():
     await bot.wait_until_ready()
@@ -3872,6 +3936,10 @@ async def before_reminders():
 
 @check_custom_cycles.before_loop
 async def before_cycles():
+    await bot.wait_until_ready()
+
+@send_custom_cycle_reminders.before_loop
+async def before_custom_reminders():
     await bot.wait_until_ready()
 
 # ══════════════════════════════════════════════════════════════
