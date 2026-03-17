@@ -126,6 +126,16 @@ def init_db():
         END $$;
     ''')
 
+    # Migration: sick_since pour /sick
+    c.execute('''
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='profiles' AND column_name='sick_since') THEN
+                ALTER TABLE profiles ADD COLUMN sick_since TEXT;
+            END IF;
+        END $$;
+    ''')
+
     # Table des défis (par serveur) - NOUVELLE STRUCTURE SIMPLIFIÉE
     c.execute('''
         CREATE TABLE IF NOT EXISTS challenge (
@@ -3316,6 +3326,136 @@ Bonne reprise !"""
     await interaction.response.send_message(embed=embed)
 
 
+@bot.tree.command(name="sick", description="Mettre en pause ton cycle (maladie/blessure)")
+@app_commands.describe(raison="Raison (optionnel)")
+async def malade_cmd(interaction: discord.Interaction, raison: str = "Non spécifiée"):
+    user_id = interaction.user.id
+    user_name = interaction.user.display_name
+    profile = get_or_create_profile(user_id, user_name)
+
+    if profile.get('sick_since'):
+        await interaction.response.send_message("Tu es déjà en pause maladie. Utilise `/unsick` pour reprendre.", ephemeral=True)
+        return
+
+    now = datetime.datetime.now(PARIS_TZ)
+
+    # Sauvegarder sick_since
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('UPDATE profiles SET sick_since = %s WHERE user_id = %s', (now.isoformat(), user_id))
+
+    # Freeze tous les défis
+    challenges = get_user_active_challenges(user_id)
+    frozen_count = 0
+    for challenge in challenges:
+        participant = get_participant(challenge['id'], user_id)
+        if participant and not participant.get('is_frozen', 0):
+            c.execute('UPDATE challenge_participants SET is_frozen = 1 WHERE challenge_id = %s AND user_id = %s',
+                      (challenge['id'], user_id))
+            frozen_count += 1
+
+    conn.commit()
+    conn.close()
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **PAUSE MALADIE**
+
+**{user_name}** est en pause.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **RAISON**
+```
+{raison[:50]}
+```
+
+◆ **EFFET**
+```
+Cycle en pause
+{frozen_count} défi(s) gelé(s)
+Pas de pénalité
+```
+
+▼ Utilise `/unsick` quand tu vas mieux."""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="unsick", description="Reprendre ton cycle après une pause maladie")
+async def unsick_cmd(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user_name = interaction.user.display_name
+    profile = get_or_create_profile(user_id, user_name)
+
+    sick_since_str = profile.get('sick_since')
+    if not sick_since_str:
+        await interaction.response.send_message("Tu n'es pas en pause maladie.", ephemeral=True)
+        return
+
+    now = datetime.datetime.now(PARIS_TZ)
+    sick_since = datetime.datetime.fromisoformat(sick_since_str)
+    if sick_since.tzinfo is None:
+        sick_since = sick_since.replace(tzinfo=PARIS_TZ)
+
+    pause_duration = now - sick_since
+    pause_days = int(pause_duration.total_seconds() / 3600 / 24)
+    pause_hours = int((pause_duration.total_seconds() / 3600) % 24)
+
+    conn = get_db()
+    c = conn.cursor()
+
+    # Décaler cycle_start_date si cycle custom
+    cycle_start_str = profile.get('cycle_start_date')
+    if cycle_start_str and is_custom_cycle(profile):
+        cycle_start = datetime.datetime.fromisoformat(cycle_start_str)
+        if cycle_start.tzinfo is None:
+            cycle_start = cycle_start.replace(tzinfo=PARIS_TZ)
+        new_start = cycle_start + pause_duration
+        c.execute('UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s',
+                  (new_start.isoformat(), user_id))
+
+    # Retirer sick_since
+    c.execute('UPDATE profiles SET sick_since = NULL WHERE user_id = %s', (user_id,))
+
+    # Unfreeze tous les défis
+    challenges = get_user_active_challenges(user_id)
+    unfrozen_count = 0
+    for challenge in challenges:
+        participant = get_participant(challenge['id'], user_id)
+        if participant and participant.get('is_frozen', 0):
+            c.execute('UPDATE challenge_participants SET is_frozen = 0 WHERE challenge_id = %s AND user_id = %s',
+                      (challenge['id'], user_id))
+            unfrozen_count += 1
+
+    conn.commit()
+    conn.close()
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""▸ **REPRISE**
+
+**{user_name}** est de retour !
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **PAUSE**
+```
+Durée : {pause_days}j {pause_hours}h
+Cycle décalé de {pause_days}j {pause_hours}h
+```
+
+◆ **EFFET**
+```
+{unfrozen_count} défi(s) repris
+Ton cycle reprend là où il en était
+```
+
+Bon retour !"""
+
+    embed.set_footer(text="◆ Challenge Bot")
+    await interaction.response.send_message(embed=embed)
+
+
 @bot.tree.command(name="rescue", description="Revenir dans le défi après un oubli de check-in")
 @app_commands.describe(photo="Photo de ta session manquée")
 async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment):
@@ -3733,8 +3873,8 @@ async def send_reminders():
             for p in participants:
                 profile = get_profile(p['user_id'])
 
-                # Skip les utilisateurs avec cycle custom — ils ont leur propre deadline
-                if is_custom_cycle(profile):
+                # Skip les utilisateurs avec cycle custom ou en pause maladie
+                if is_custom_cycle(profile) or (profile and profile.get('sick_since')):
                     continue
 
                 count, goal = get_user_progress(p['user_id'], profile)
@@ -3886,6 +4026,11 @@ async def send_custom_cycle_reminders():
     for profile in cycle_profiles:
         try:
             user_id = int(profile['user_id'])
+
+            # Skip si en pause maladie
+            if profile.get('sick_since'):
+                continue
+
             cycle_start = datetime.datetime.fromisoformat(profile['cycle_start_date'])
             if cycle_start.tzinfo is None:
                 cycle_start = cycle_start.replace(tzinfo=PARIS_TZ)
