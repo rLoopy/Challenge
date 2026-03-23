@@ -146,6 +146,16 @@ def init_db():
         )
     ''')
 
+    # Migration: cycle_pause_seconds pour pause maladie (étend la fin du cycle)
+    c.execute('''
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='profiles' AND column_name='cycle_pause_seconds') THEN
+                ALTER TABLE profiles ADD COLUMN cycle_pause_seconds INTEGER DEFAULT 0;
+            END IF;
+        END $$;
+    ''')
+
     # Table des défis (par serveur) - NOUVELLE STRUCTURE SIMPLIFIÉE
     c.execute('''
         CREATE TABLE IF NOT EXISTS challenge (
@@ -469,12 +479,12 @@ def get_checkins_for_challenge_week(challenge_id, week_number, year):
         result[p['user_id']] = get_checkins_for_user_week(p['user_id'], week_number, year)
     return result
 
-def get_checkins_for_user_cycle(user_id, cycle_start_date, cycle_days):
+def get_checkins_for_user_cycle(user_id, cycle_start_date, cycle_days, pause_seconds=0):
     """Compte les check-ins dans un cycle personnalisé (par plage de dates)"""
     start = datetime.datetime.fromisoformat(cycle_start_date)
     if start.tzinfo is None:
         start = start.replace(tzinfo=PARIS_TZ)
-    end = start + datetime.timedelta(days=cycle_days)
+    end = start + datetime.timedelta(days=cycle_days) + datetime.timedelta(seconds=pause_seconds)
 
     conn = get_db()
     c = conn.cursor()
@@ -503,7 +513,8 @@ def get_user_progress(user_id, profile=None):
         cycle_start = profile.get('cycle_start_date') if profile else None
         if not cycle_start:
             return 0, cycle_goal
-        count = get_checkins_for_user_cycle(user_id, cycle_start, cycle_days)
+        pause_secs = (profile.get('cycle_pause_seconds') or 0) if profile else 0
+        count = get_checkins_for_user_cycle(user_id, cycle_start, cycle_days, pause_secs)
         return count, cycle_goal
 
 def get_cycle_days_remaining(profile):
@@ -521,7 +532,7 @@ def get_cycle_days_remaining(profile):
         start = datetime.datetime.fromisoformat(cycle_start)
         if start.tzinfo is None:
             start = start.replace(tzinfo=PARIS_TZ)
-        end = start + datetime.timedelta(days=cycle_days)
+        end = start + datetime.timedelta(days=cycle_days) + get_cycle_pause_td(profile)
     remaining = end - now
     if remaining.total_seconds() <= 0:
         return 0, 0
@@ -540,6 +551,11 @@ def get_cycle_label(profile):
 def is_custom_cycle(profile):
     """Vérifie si un utilisateur a un cycle personnalisé"""
     return profile and (profile.get('cycle_days') or 7) != 7
+
+def get_cycle_pause_td(profile):
+    """Retourne le timedelta de pause accumulé (maladie)"""
+    secs = (profile.get('cycle_pause_seconds') or 0) if profile else 0
+    return datetime.timedelta(seconds=secs)
 
 # ── Workout plan helpers ──
 
@@ -578,7 +594,7 @@ def get_cycle_workout_status(user_id, profile=None):
         start = datetime.datetime.fromisoformat(cycle_start)
         if start.tzinfo is None:
             start = start.replace(tzinfo=PARIS_TZ)
-        end = start + datetime.timedelta(days=cycle_days)
+        end = start + datetime.timedelta(days=cycle_days) + get_cycle_pause_td(profile)
         c.execute('''
             SELECT workout_name, COUNT(*) as count FROM checkins
             WHERE user_id = %s AND timestamp >= %s AND timestamp < %s
@@ -1461,7 +1477,7 @@ Objectif: {profile['weekly_goal']}x/semaine"""
     conn = get_db()
     c = conn.cursor()
     c.execute('''
-        UPDATE profiles SET cycle_days = %s, cycle_goal = %s, cycle_start_date = %s
+        UPDATE profiles SET cycle_days = %s, cycle_goal = %s, cycle_start_date = %s, cycle_pause_seconds = 0
         WHERE user_id = %s
     ''', (jours, objectif, cycle_start, joueur.id))
     conn.commit()
@@ -1622,7 +1638,7 @@ async def cycleinfo_cmd(interaction: discord.Interaction):
     start_dt = datetime.datetime.fromisoformat(cycle_start)
     if start_dt.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=PARIS_TZ)
-    end_dt = start_dt + datetime.timedelta(days=cycle_days)
+    end_dt = start_dt + datetime.timedelta(days=cycle_days) + get_cycle_pause_td(profile)
 
     now = datetime.datetime.now(PARIS_TZ)
     elapsed = (now - start_dt).days
@@ -3451,15 +3467,12 @@ async def unsick_cmd(interaction: discord.Interaction):
     conn = get_db()
     c = conn.cursor()
 
-    # Décaler cycle_start_date si cycle custom
-    cycle_start_str = profile.get('cycle_start_date')
-    if cycle_start_str and is_custom_cycle(profile):
-        cycle_start = datetime.datetime.fromisoformat(cycle_start_str)
-        if cycle_start.tzinfo is None:
-            cycle_start = cycle_start.replace(tzinfo=PARIS_TZ)
-        new_start = cycle_start + pause_duration
-        c.execute('UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s',
-                  (new_start.isoformat(), user_id))
+    # Étendre le cycle par la durée de la pause (au lieu de décaler le start)
+    if is_custom_cycle(profile):
+        current_pause = profile.get('cycle_pause_seconds') or 0
+        new_pause = current_pause + int(pause_duration.total_seconds())
+        c.execute('UPDATE profiles SET cycle_pause_seconds = %s WHERE user_id = %s',
+                  (new_pause, user_id))
 
     # Retirer sick_since + clôturer la période
     c.execute('UPDATE profiles SET sick_since = NULL WHERE user_id = %s', (user_id,))
@@ -3497,7 +3510,7 @@ async def unsick_cmd(interaction: discord.Interaction):
 ◆ **PAUSE**
 ```
 Durée : {pause_days}j {pause_hours}h
-Cycle décalé de {pause_days}j {pause_hours}h
+Cycle étendu de {pause_days}j {pause_hours}h
 ```
 
 ◆ **EFFET**
@@ -3982,21 +3995,22 @@ async def check_custom_cycles():
             if cycle_start.tzinfo is None:
                 cycle_start = cycle_start.replace(tzinfo=PARIS_TZ)
 
-            cycle_end = cycle_start + datetime.timedelta(days=profile['cycle_days'])
+            cycle_end = cycle_start + datetime.timedelta(days=profile['cycle_days']) + get_cycle_pause_td(profile)
 
             if now < cycle_end:
                 continue
 
             user_id = int(profile['user_id'])
             cycle_goal = profile.get('cycle_goal') or profile['weekly_goal']
-            count = get_checkins_for_user_cycle(user_id, profile['cycle_start_date'], profile['cycle_days'])
+            pause_secs = profile.get('cycle_pause_seconds') or 0
+            count = get_checkins_for_user_cycle(user_id, profile['cycle_start_date'], profile['cycle_days'], pause_secs)
 
             conn = get_db()
             c = conn.cursor()
 
             if count >= cycle_goal:
                 c.execute('''
-                    UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s
+                    UPDATE profiles SET cycle_start_date = %s, cycle_pause_seconds = 0 WHERE user_id = %s
                 ''', (now.strftime('%Y-%m-%dT00:00:00'), user_id))
                 conn.commit()
                 conn.close()
@@ -4051,7 +4065,7 @@ async def check_custom_cycles():
                         await channel.send(f"<@{user_id}>", embed=embed)
 
                 c.execute('''
-                    UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s
+                    UPDATE profiles SET cycle_start_date = %s, cycle_pause_seconds = 0 WHERE user_id = %s
                 ''', (now.strftime('%Y-%m-%dT00:00:00'), user_id))
                 conn.commit()
                 conn.close()
@@ -4091,7 +4105,7 @@ async def send_custom_cycle_reminders():
             if cycle_start.tzinfo is None:
                 cycle_start = cycle_start.replace(tzinfo=PARIS_TZ)
 
-            cycle_end = cycle_start + datetime.timedelta(days=profile['cycle_days'])
+            cycle_end = cycle_start + datetime.timedelta(days=profile['cycle_days']) + get_cycle_pause_td(profile)
             remaining_td = cycle_end - now
             remaining_hours = remaining_td.total_seconds() / 3600
 
@@ -4100,7 +4114,8 @@ async def send_custom_cycle_reminders():
                 continue
 
             cycle_goal = profile.get('cycle_goal') or profile['weekly_goal']
-            count = get_checkins_for_user_cycle(user_id, profile['cycle_start_date'], profile['cycle_days'])
+            pause_secs = profile.get('cycle_pause_seconds') or 0
+            count = get_checkins_for_user_cycle(user_id, profile['cycle_start_date'], profile['cycle_days'], pause_secs)
             sessions_left = max(0, cycle_goal - count)
 
             if sessions_left <= 0:
