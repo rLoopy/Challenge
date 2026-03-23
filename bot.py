@@ -341,14 +341,12 @@ def init_db():
     c.execute('''UPDATE profiles SET cycle_days = 9, cycle_start_date = '2026-03-02T00:00:00'
                  WHERE user_id = 265556280033148929 AND (cycle_days = 10 OR cycle_start_date = '2026-03-01T00:00:00')''')
 
-    # One-time fix: revert /unsick cycle_start shift (6 days) + backfill sick period 17-23 mars
+    # One-time fix: restore cycle_start to Mar 11 (auto-advance ran during sick period)
     c.execute('''UPDATE profiles
-                 SET cycle_start_date = TO_CHAR(
-                     (cycle_start_date::timestamp - INTERVAL '6 days'),
-                     'YYYY-MM-DD"T"HH24:MI:SS'
-                 ), cycle_pause_seconds = 518400
-                 WHERE user_id = 265556280033148929 AND cycle_pause_seconds = 0
-                 AND cycle_start_date > '2026-03-20T00:00:00' ''')
+                 SET cycle_start_date = '2026-03-11T00:00:00', cycle_pause_seconds = 518400
+                 WHERE user_id = 265556280033148929
+                 AND cycle_start_date >= '2026-03-20T00:00:00'
+                 AND cycle_start_date < '2026-03-21T00:00:00' ''')
     c.execute('''INSERT INTO sick_periods (user_id, start_date, end_date)
                  SELECT 265556280033148929, '2026-03-17T00:00:00', '2026-03-23T00:00:00'
                  WHERE NOT EXISTS (
@@ -4006,6 +4004,10 @@ async def check_custom_cycles():
 
     for profile in cycle_profiles:
         try:
+            # Skip si en pause maladie
+            if profile.get('sick_since'):
+                continue
+
             cycle_start = datetime.datetime.fromisoformat(profile['cycle_start_date'])
             if cycle_start.tzinfo is None:
                 cycle_start = cycle_start.replace(tzinfo=PARIS_TZ)
