@@ -136,6 +136,16 @@ def init_db():
         END $$;
     ''')
 
+    # Table des périodes de maladie (historique)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS sick_periods (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT
+        )
+    ''')
+
     # Table des défis (par serveur) - NOUVELLE STRUCTURE SIMPLIFIÉE
     c.execute('''
         CREATE TABLE IF NOT EXISTS challenge (
@@ -2596,7 +2606,27 @@ async def calendar_cmd(interaction: discord.Interaction):
     ''', (user_id,))
 
     rows = c.fetchall()
+
+    # Récupérer les périodes de maladie
+    c.execute('''
+        SELECT start_date, end_date FROM sick_periods
+        WHERE user_id = %s
+        ORDER BY start_date DESC
+    ''', (user_id,))
+    sick_rows = c.fetchall()
     conn.close()
+
+    # Construire un set des jours sick
+    sick_days = set()
+    for sr in sick_rows:
+        s_start = datetime.datetime.fromisoformat(sr['start_date']).date()
+        s_end = (datetime.datetime.fromisoformat(sr['end_date']).date() if sr['end_date']
+                 else today)
+        d = max(s_start, thirty_days_ago)
+        s_end = min(s_end, today)
+        while d <= s_end:
+            sick_days.add(d)
+            d += datetime.timedelta(days=1)
 
     # Extraire les dates avec check-in (30 derniers jours) et tracker le type
     # On garde une entrée par date avec le type (si plusieurs check-ins le même jour, on prend le premier)
@@ -2623,35 +2653,50 @@ async def calendar_cmd(interaction: discord.Interaction):
     # Noms des jours
     day_names = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
 
-    # Construire la timeline
+    # Construire la timeline (check-ins + jours sick)
+    all_dates = set(checkin_dates) | sick_days
+    all_dates_sorted = sorted(all_dates)
+
     timeline = ""
-    for checkin_date in checkin_dates:
-        day_name = day_names[checkin_date.weekday()]
-        session_type = checkin_data[checkin_date]
+    for d in all_dates_sorted:
+        day_name = day_names[d.weekday()]
+        is_sick = d in sick_days
+        has_checkin = d in checkin_data
 
-        # Afficher 🏃 pour cardio
-        if session_type == 'cardio':
-            if checkin_date == today:
-                timeline += f"│  {checkin_date.day:02d} {day_name} ━━◆ 🏃 today   │\n"
+        if has_checkin:
+            session_type = checkin_data[d]
+            if session_type == 'cardio':
+                if d == today:
+                    timeline += f"│  {d.day:02d} {day_name} ━━◆ 🏃 today   │\n"
+                else:
+                    timeline += f"│  {d.day:02d} {day_name} ━━● 🏃          │\n"
             else:
-                timeline += f"│  {checkin_date.day:02d} {day_name} ━━● 🏃          │\n"
-        else:
-            if checkin_date == today:
-                timeline += f"│  {checkin_date.day:02d} {day_name} ━━◆ aujourd'hui  │\n"
+                if d == today:
+                    timeline += f"│  {d.day:02d} {day_name} ━━◆ aujourd'hui  │\n"
+                else:
+                    timeline += f"│  {d.day:02d} {day_name} ━━●              │\n"
+        elif is_sick:
+            if d == today:
+                timeline += f"│  {d.day:02d} {day_name} ━━✕ 🤒 today   │\n"
             else:
-                timeline += f"│  {checkin_date.day:02d} {day_name} ━━●              │\n"
+                timeline += f"│  {d.day:02d} {day_name} ━━✕ 🤒          │\n"
 
-    # Si pas de check-ins
-    if not checkin_dates:
+    # Si rien à afficher
+    if not all_dates_sorted:
         timeline = "│                          │\n"
         timeline += "│    Aucune session        │\n"
         timeline += "│    ces 30 derniers jours │\n"
         timeline += "│                          │\n"
 
     total_sessions = len(checkin_dates)
+    sick_count = len(sick_days - set(checkin_dates))  # jours sick sans check-in
 
-    # Stats séparées gym/cardio
-    if cardio_count > 0:
+    # Stats séparées gym/cardio + sick
+    if sick_count > 0 and cardio_count > 0:
+        stats_line = f"│ 🏋️{gym_count:>2} 🏃{cardio_count:>2} 🤒{sick_count:>2} Tot:{total_sessions:<2}│"
+    elif sick_count > 0:
+        stats_line = f"│  Sessions: {total_sessions:<2}  │  🤒 {sick_count:>2}j  │"
+    elif cardio_count > 0:
         stats_line = f"│  🏋️ {gym_count:>2}  │  🏃 {cardio_count:>2}  │  Total: {total_sessions:<2} │"
     else:
         stats_line = f"│  Sessions: {total_sessions:<14} │"
@@ -3339,10 +3384,11 @@ async def malade_cmd(interaction: discord.Interaction, raison: str = "Non spéci
 
     now = datetime.datetime.now(PARIS_TZ)
 
-    # Sauvegarder sick_since
+    # Sauvegarder sick_since + créer période
     conn = get_db()
     c = conn.cursor()
     c.execute('UPDATE profiles SET sick_since = %s WHERE user_id = %s', (now.isoformat(), user_id))
+    c.execute('INSERT INTO sick_periods (user_id, start_date) VALUES (%s, %s)', (user_id, now.isoformat()))
 
     # Freeze tous les défis
     challenges = get_user_active_challenges(user_id)
@@ -3415,8 +3461,18 @@ async def unsick_cmd(interaction: discord.Interaction):
         c.execute('UPDATE profiles SET cycle_start_date = %s WHERE user_id = %s',
                   (new_start.isoformat(), user_id))
 
-    # Retirer sick_since
+    # Retirer sick_since + clôturer la période
     c.execute('UPDATE profiles SET sick_since = NULL WHERE user_id = %s', (user_id,))
+    # Clôturer la période ouverte, ou en créer une rétroactivement si elle n'existe pas
+    c.execute('SELECT id FROM sick_periods WHERE user_id = %s AND end_date IS NULL', (user_id,))
+    open_period = c.fetchone()
+    if open_period:
+        c.execute('UPDATE sick_periods SET end_date = %s WHERE id = %s',
+                  (now.isoformat(), open_period['id']))
+    else:
+        # Période créée avant la table sick_periods — on la reconstitue
+        c.execute('INSERT INTO sick_periods (user_id, start_date, end_date) VALUES (%s, %s, %s)',
+                  (user_id, sick_since.isoformat(), now.isoformat()))
 
     # Unfreeze tous les défis
     challenges = get_user_active_challenges(user_id)
