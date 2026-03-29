@@ -2682,12 +2682,11 @@ async def calendar_cmd(interaction: discord.Interaction):
     # Noms des jours
     day_names = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
 
-    # Construire la timeline (check-ins + jours sick)
-    all_dates = set(checkin_dates) | sick_days
-    all_dates_sorted = sorted(all_dates)
-
+    # Construire la timeline des 30 derniers jours
     timeline = ""
-    for d in all_dates_sorted:
+    d = thirty_days_ago
+    rest_count = 0
+    while d <= today:
         day_name = day_names[d.weekday()]
         is_sick = d in sick_days
         has_checkin = d in checkin_data
@@ -2709,26 +2708,27 @@ async def calendar_cmd(interaction: discord.Interaction):
                 timeline += f"│  {d.day:02d} {day_name} ━━✕ 🤒 today   │\n"
             else:
                 timeline += f"│  {d.day:02d} {day_name} ━━✕ 🤒          │\n"
+        else:
+            rest_count += 1
+            if d == today:
+                timeline += f"│  {d.day:02d} {day_name} ━━○ aujourd'hui  │\n"
+            else:
+                timeline += f"│  {d.day:02d} {day_name} ━━○ repos        │\n"
 
-    # Si rien à afficher
-    if not all_dates_sorted:
-        timeline = "│                          │\n"
-        timeline += "│    Aucune session        │\n"
-        timeline += "│    ces 30 derniers jours │\n"
-        timeline += "│                          │\n"
+        d += datetime.timedelta(days=1)
 
-    total_sessions = len(checkin_dates)
     sick_count = len(sick_days - set(checkin_dates))  # jours sick sans check-in
 
-    # Stats séparées gym/cardio + sick
-    if sick_count > 0 and cardio_count > 0:
-        stats_line = f"│ 🏋️{gym_count:>2} 🏃{cardio_count:>2} 🤒{sick_count:>2} Tot:{total_sessions:<2}│"
-    elif sick_count > 0:
-        stats_line = f"│  Sessions: {total_sessions:<2}  │  🤒 {sick_count:>2}j  │"
-    elif cardio_count > 0:
-        stats_line = f"│  🏋️ {gym_count:>2}  │  🏃 {cardio_count:>2}  │  Total: {total_sessions:<2} │"
-    else:
-        stats_line = f"│  Sessions: {total_sessions:<14} │"
+    # Stats séparées gym/cardio/repos/sick
+    parts = []
+    if gym_count > 0:
+        parts.append(f"🏋️{gym_count}")
+    if cardio_count > 0:
+        parts.append(f"🏃{cardio_count}")
+    if sick_count > 0:
+        parts.append(f"🤒{sick_count}")
+    parts.append(f"○{rest_count}")
+    stats_line = f"│  {' '.join(parts):<24}│"
 
     embed = discord.Embed(color=EMBED_COLOR)
 
