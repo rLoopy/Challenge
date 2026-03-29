@@ -3608,7 +3608,17 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
 
     # Récupérer le profil pour l'objectif
     profile = get_profile(user_id)
-    current_count, goal = get_user_progress(user_id, profile)
+    cycle_days = (profile.get('cycle_days') or 7) if profile else 7
+    goal = profile['weekly_goal'] if profile else 4
+
+    if cycle_days == 7:
+        # Compter les check-ins de la semaine de l'élimination (pas la semaine courante)
+        current_count = get_checkins_for_user_week(user_id, week_number, year, count_gym_only=False)
+    else:
+        goal = (profile.get('cycle_goal') or profile['weekly_goal']) if profile else 4
+        cycle_start = profile.get('cycle_start_date') if profile else None
+        pause_secs = (profile.get('cycle_pause_seconds') or 0) if profile else 0
+        current_count = get_checkins_for_user_cycle(user_id, cycle_start, cycle_days, pause_secs) if cycle_start else 0
 
     # Avec le rescue, le count sera +1
     new_count = current_count + 1
