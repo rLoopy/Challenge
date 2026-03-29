@@ -2611,9 +2611,11 @@ Cette action est irréversible."""
 
 
 @bot.tree.command(name="calendar", description="Ton calendrier personnel (30 derniers jours)")
-async def calendar_cmd(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    user_name = interaction.user.display_name
+@app_commands.describe(membre="Voir le calendrier d'un autre membre")
+async def calendar_cmd(interaction: discord.Interaction, membre: discord.Member = None):
+    target = membre or interaction.user
+    user_id = target.id
+    user_name = target.display_name
 
     # Récupérer le profil
     profile = get_or_create_profile(user_id, user_name)
