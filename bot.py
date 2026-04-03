@@ -2797,6 +2797,13 @@ async def mystats_cmd(interaction: discord.Interaction):
     ''', (user_id,))
     challenges_won = c.fetchone()['count']
 
+    # Récupérer les périodes de maladie pour déduire du calcul de moyenne
+    c.execute('''
+        SELECT start_date, end_date FROM sick_periods
+        WHERE user_id = %s
+    ''', (user_id,))
+    sick_rows_stats = c.fetchall()
+
     conn.close()
 
     total_sessions = len(all_checkins)
@@ -2853,8 +2860,23 @@ Commence avec `/checkin` !"""
         weeks_set.add((ci['year'], ci['week_number']))
     total_weeks_active = len(weeks_set)
 
-    # Moyenne par semaine (basée sur les semaines écoulées depuis le premier check-in)
-    total_calendar_weeks = max(1, (total_days // 7) + 1)
+    # Calculer les jours sick dans la période (entre premier check-in et maintenant)
+    total_sick_days = 0
+    first_date = first_ts.date()
+    today_date = now.date()
+    for sr in sick_rows_stats:
+        s_start = datetime.datetime.fromisoformat(sr['start_date']).date()
+        s_end = (datetime.datetime.fromisoformat(sr['end_date']).date() if sr['end_date']
+                 else today_date)
+        # Limiter à la période de tracking
+        s_start = max(s_start, first_date)
+        s_end = min(s_end, today_date)
+        if s_start <= s_end:
+            total_sick_days += (s_end - s_start).days + 1
+
+    # Moyenne par semaine (basée sur les semaines écoulées, moins les jours sick)
+    effective_days = max(1, total_days - total_sick_days)
+    total_calendar_weeks = max(1, (effective_days // 7) + 1)
     avg_per_week = total_sessions / total_calendar_weeks
 
     # Semaines avec objectif atteint (streak tracking)
