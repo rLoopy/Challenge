@@ -362,6 +362,12 @@ def init_db():
                  AND cycle_start_date LIKE '2026-03-25T15:21%%'
                  AND COALESCE(cycle_pause_seconds, 0) = 0''')
 
+    # One-time fix: reset cycle to 15/04/2026 midnight Geneva (post-unfreeze)
+    c.execute('''UPDATE profiles
+                 SET cycle_start_date = '2026-04-15T00:00:00', cycle_pause_seconds = 0
+                 WHERE user_id = 265556280033148929
+                 AND cycle_start_date != '2026-04-15T00:00:00' ''')
+
     conn.commit()
     conn.close()
     print("✅ Base de données PostgreSQL initialisée")
