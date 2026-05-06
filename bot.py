@@ -4030,13 +4030,15 @@ async def send_reminders():
             print(f"Erreur send_reminders pour challenge {challenge.get('id')}: {e}")
 
 
-@tasks.loop(minutes=1)
+@tasks.loop(hours=1)
 async def check_custom_cycles():
-    """Vérifie les cycles personnalisés à minuit chaque jour"""
-    now = datetime.datetime.now(PARIS_TZ)
+    """Vérifie chaque heure les cycles personnalisés expirés (rollover ou échec).
 
-    if now.hour != 0 or now.minute != 0:
-        return
+    Robuste aux downtimes : le filtre `if now < cycle_end: continue` plus bas
+    suffit à n'agir que sur les cycles réellement terminés, et le `UPDATE
+    cycle_start_date = now` rend le traitement idempotent au tour suivant.
+    """
+    now = datetime.datetime.now(PARIS_TZ)
 
     conn = get_db()
     c = conn.cursor()
