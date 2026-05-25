@@ -295,7 +295,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS history (
             id SERIAL PRIMARY KEY,
             challenge_id INTEGER NOT NULL,
-            guild_id BIGINT,
             winner_id BIGINT,
             winner_name TEXT,
             loser_id BIGINT,
@@ -3601,7 +3600,7 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
         SELECT h.*, c.id as challenge_id, c.is_active
         FROM history h
         JOIN challenge c ON h.challenge_id = c.id
-        WHERE h.guild_id = %s AND h.loser_id = %s
+        WHERE c.guild_id = %s AND h.loser_id = %s
         ORDER BY h.id DESC LIMIT 1
     ''', (guild_id, user_id))
     history_row = c.fetchone()
@@ -3640,8 +3639,11 @@ async def rescue_cmd(interaction: discord.Interaction, photo: discord.Attachment
         )
         return
 
-    # La semaine de l'échec = semaine de end_date (le check hebdo tourne dimanche soir)
-    iso = end_date.isocalendar()
+    # La semaine de l'échec = la semaine qui précède end_date : le check hebdo
+    # tourne lundi 00:00, donc end_date tombe sur le lundi de la NOUVELLE semaine
+    # ISO. La semaine réellement échouée est celle de la veille.
+    failed_ref = end_date - datetime.timedelta(days=1)
+    iso = failed_ref.isocalendar()
     week_number, year = iso[1], iso[0]
 
     # Récupérer le profil pour l'objectif
@@ -3852,9 +3854,9 @@ async def check_weekly_goals():
                               (challenge['id'], fp['user_id']))
 
                     c.execute('''
-                        INSERT INTO history (challenge_id, guild_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
-                        VALUES (%s, %s, NULL, NULL, %s, %s, %s, %s, %s, %s)
-                    ''', (challenge['id'], challenge['guild_id'], fp['user_id'], fp['user_name'], fp['gage'], now.isoformat(), 'Objectif non atteint', total_weeks))
+                        INSERT INTO history (challenge_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
+                        VALUES (%s, NULL, NULL, %s, %s, %s, %s, %s, %s)
+                    ''', (challenge['id'], fp['user_id'], fp['user_name'], fp['gage'], now.isoformat(), 'Objectif non atteint', total_weeks))
 
                 embed = discord.Embed(color=EMBED_COLOR)
 
@@ -4098,9 +4100,9 @@ async def check_custom_cycles():
 
                     total_weeks = challenge.get('total_weeks', 0)
                     c.execute('''
-                        INSERT INTO history (challenge_id, guild_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
-                        VALUES (%s, %s, NULL, NULL, %s, %s, %s, %s, %s, %s)
-                    ''', (challenge['id'], challenge['guild_id'], user_id, profile['user_name'],
+                        INSERT INTO history (challenge_id, winner_id, winner_name, loser_id, loser_name, loser_gage, end_date, reason, total_weeks)
+                        VALUES (%s, NULL, NULL, %s, %s, %s, %s, %s, %s)
+                    ''', (challenge['id'], user_id, profile['user_name'],
                           participant['gage'], now.isoformat(), f'Cycle {profile["cycle_days"]}j non atteint ({count}/{cycle_goal})', total_weeks))
 
                     channel = bot.get_channel(challenge['channel_id'])
