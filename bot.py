@@ -2221,9 +2221,39 @@ async def backfill(
         await interaction.response.send_message("Maximum 30 jours en arrière.", ephemeral=True)
         return
 
+    profile = get_or_create_profile(user_id, user_name)
+    if is_custom_cycle(profile):
+        cycle_start = profile.get('cycle_start_date')
+        if cycle_start:
+            start = datetime.datetime.fromisoformat(cycle_start)
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=PARIS_TZ)
+            end = start + datetime.timedelta(days=profile['cycle_days']) + get_cycle_pause_td(profile)
+            end_inclusive = end - datetime.timedelta(seconds=1)
+            goal = profile.get('cycle_goal') or profile['weekly_goal']
+            if session_dt < start:
+                days_back = (start.date() - session_dt.date()).days
+                await interaction.response.send_message(
+                    f"⚠ **{session_dt.strftime('%d/%m/%Y')}** est **avant** ton cycle actuel "
+                    f"({start.strftime('%d/%m/%Y')} → {end_inclusive.strftime('%d/%m/%Y')}).\n\n"
+                    f"Un backfill ici ne compterait pas (reste 0/{goal}).\n"
+                    f"Recule d'abord le début du cycle :\n"
+                    f"→ `/adjustcycle joueur:{interaction.user.mention} jours:{days_back}`\n"
+                    f"Puis refais `/backfill` (ou vérifie `/cycleinfo`).",
+                    ephemeral=True,
+                )
+                return
+            if session_dt >= end:
+                await interaction.response.send_message(
+                    f"⚠ **{session_dt.strftime('%d/%m/%Y')}** est **après** ton cycle actuel "
+                    f"({start.strftime('%d/%m/%Y')} → {end_inclusive.strftime('%d/%m/%Y')}).\n\n"
+                    f"Lance un nouveau cycle avec `/setcycle` avant de backfill.",
+                    ephemeral=True,
+                )
+                return
+
     await interaction.response.defer()
 
-    profile = get_or_create_profile(user_id, user_name)
     date_key = session_dt.date().isoformat()
 
     conn = get_db()
