@@ -76,19 +76,6 @@ def parse_backfill_date(date_str: str) -> datetime.datetime:
         raise ValueError("Format invalide. Utilise JJ/MM/AAAA (ex: 31/05/2026).")
     return datetime.datetime.combine(parsed, datetime.time(20, 0), tzinfo=PARIS_TZ)
 
-def resolve_plan_seance(user_id: int, seance: str):
-    """Valide une séance contre le plan utilisateur. Retourne (session_type, workout_name)."""
-    plan = get_workout_plan(user_id)
-    if not plan:
-        raise ValueError("Aucun plan d'entraînement. Configure-le avec `/setworkouts`.")
-    seance_norm = seance.strip()
-    for entry in plan:
-        if entry['workout_name'].lower() == seance_norm.lower():
-            session_type = 'cardio' if entry.get('is_cardio') else 'gym'
-            return session_type, entry['workout_name']
-    names = sorted({e['workout_name'] for e in plan})
-    raise ValueError(f"Séance inconnue. Options: {', '.join(names)}")
-
 def get_challenge_week_number(challenge_start_date: str) -> int:
     """Retourne le numéro de semaine du défi (1, 2, 3...) depuis le début"""
     start = datetime.datetime.fromisoformat(challenge_start_date)
@@ -2192,14 +2179,18 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
 @bot.tree.command(name="backfill", description="Enregistrer une session passée (jusqu'à 30 jours)")
 @app_commands.describe(
     date="Date de la session (JJ/MM/AAAA, ex: 31/05/2026)",
-    seance="Séance du plan (autocomplete)",
+    type="Type de session (Gym par défaut)",
     note="Note optionnelle (ex: Run 5km Strava)",
     photo="Photo optionnelle"
 )
+@app_commands.choices(type=[
+    app_commands.Choice(name="🏋️ Gym", value="gym"),
+    app_commands.Choice(name="🏃 Cardio", value="cardio")
+])
 async def backfill(
     interaction: discord.Interaction,
     date: str,
-    seance: str,
+    type: Optional[str] = "gym",
     note: Optional[str] = None,
     photo: Optional[discord.Attachment] = None,
 ):
@@ -2230,12 +2221,6 @@ async def backfill(
         await interaction.response.send_message("Maximum 30 jours en arrière.", ephemeral=True)
         return
 
-    try:
-        session_type, workout_name = resolve_plan_seance(user_id, seance)
-    except ValueError as e:
-        await interaction.response.send_message(str(e), ephemeral=True)
-        return
-
     await interaction.response.defer()
 
     profile = get_or_create_profile(user_id, user_name)
@@ -2264,12 +2249,13 @@ async def backfill(
     if note:
         backfill_note += f" {note}"
     photo_url = photo.url if photo else None
+    session_type = type or "gym"
 
     c.execute('''
-        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type, workout_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id
-    ''', (user_id, timestamp, week_number, year, photo_url, backfill_note, session_type, workout_name))
+    ''', (user_id, timestamp, week_number, year, photo_url, backfill_note, session_type))
     checkin_id = c.fetchone()['id']
     conn.commit()
     conn.close()
@@ -2286,14 +2272,27 @@ async def backfill(
         status_emoji = "▸"
 
     note_text = f"\n📝 *{note}*" if note else ""
-    type_icon = "🏃" if session_type == 'cardio' else "🏋️"
     session_date = session_dt.strftime('%d/%m/%Y')
 
-    workout_plan = get_workout_plan(user_id)
-    rotation_text = ""
-    if workout_plan:
-        done = get_cycle_workout_status(user_id, profile)
-        rotation_text = f"\n\n◆ **ROTATION**\n```\n{format_rotation_status(workout_plan, done, highlight=workout_name)}\n```"
+    current_guild_id = interaction.guild.id if interaction.guild else None
+    current_challenge = get_active_challenge_for_guild(current_guild_id) if current_guild_id else None
+
+    progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+    ping_ids = []
+
+    if current_challenge:
+        participants = get_challenge_participants(current_challenge['id'])
+        for p in participants:
+            p_user_id = int(p['user_id'])
+            if p_user_id != user_id:
+                p_profile = get_profile(p_user_id)
+                p_count, p_goal = get_user_progress(p_user_id, p_profile)
+                p_frozen = p.get('is_frozen', 0)
+                if p_frozen:
+                    progression_text += f"{p['user_name'][:10]:10} ❄️ FREEZE\n"
+                else:
+                    progression_text += f"{p['user_name'][:10]:10} {progress_bar(p_count, p_goal)} {p_count}/{p_goal}\n"
+                ping_ids.append(p_user_id)
 
     if is_custom_cycle(profile):
         cd = profile.get('cycle_days', 7)
@@ -2306,44 +2305,109 @@ async def backfill(
 
 **{user_name.upper()}**
 
-{type_icon} **{workout_name}**
 {user_activity}
 **{user_count} / {user_goal}**{note_text}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+◆ **PROGRESSION**
+```
+{progression_text.strip()}
+```
+
 ◆ **TEMPS RESTANT**
 ```
 {deadline_text}
-```{rotation_text}
+```
 
-⏰ *Check-in #{checkin_id} enregistré rétroactivement*"""
+⏰ *Check-in enregistré rétroactivement — choisis ta séance ci-dessous*"""
 
     if photo_url:
         embed.set_image(url=photo_url)
     embed.set_footer(text="◆ Challenge Bot • Backfill")
 
-    await interaction.followup.send(embed=embed)
+    other_challenges = [ch for ch in active_challenges if ch['guild_id'] != current_guild_id]
+    if other_challenges:
+        embed.description += f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)..."
 
+    workout_view = None
+    workout_plan = get_workout_plan(user_id)
+    if workout_plan:
+        done_workouts = get_cycle_workout_status(user_id, profile)
+        remaining = get_remaining_workouts(workout_plan, done_workouts)
+        if remaining:
+            workout_view = WorkoutSelectView(checkin_id, user_id, remaining, workout_plan)
 
-@backfill.autocomplete('seance')
-async def backfill_seance_autocomplete(interaction: discord.Interaction, current: str):
-    plan = get_workout_plan(interaction.user.id)
-    if not plan:
-        return []
-    current_lower = (current or '').lower()
-    choices = []
-    seen_cardio = False
-    for entry in plan:
-        name = entry['workout_name']
-        if entry.get('is_cardio'):
-            if seen_cardio:
-                continue
-            seen_cardio = True
-        if current_lower in name.lower():
-            icon = "🏃" if entry.get('is_cardio') else "🏋️"
-            choices.append(app_commands.Choice(name=f"{icon} {name}", value=name))
-    return choices[:25]
+    ping_content = " ".join([f"<@{pid}>" for pid in ping_ids]) if ping_ids else None
+    send_kwargs = {"content": ping_content, "embed": embed}
+    if workout_view is not None:
+        send_kwargs["view"] = workout_view
+    await interaction.followup.send(**send_kwargs)
+
+    cross_post_success = 0
+    cross_post_fail = 0
+
+    for challenge in other_challenges:
+        checkin_channel_id = challenge.get('checkin_channel_id') or challenge['channel_id']
+        channel = bot.get_channel(checkin_channel_id)
+
+        if channel:
+            participants = get_challenge_participants(challenge['id'])
+            others = [p for p in participants if int(p['user_id']) != user_id]
+
+            progression_text = f"{user_name[:10]:10} {progress_bar(user_count, user_goal)} {user_count}/{user_goal}\n"
+            cross_ping_ids = []
+
+            for other in others:
+                other_user_id = int(other['user_id'])
+                other_profile = get_profile(other_user_id)
+                other_count, other_goal = get_user_progress(other_user_id, other_profile)
+                other_frozen = other.get('is_frozen', 0)
+                if other_frozen:
+                    progression_text += f"{other['user_name'][:10]:10} ❄️ FREEZE\n"
+                else:
+                    progression_text += f"{other['user_name'][:10]:10} {progress_bar(other_count, other_goal)} {other_count}/{other_goal}\n"
+                cross_ping_ids.append(other_user_id)
+
+            cross_embed = discord.Embed(color=EMBED_COLOR)
+            cross_embed.description = f"""{status_emoji} **CHECK-IN** (backfill {session_date})
+
+**{user_name.upper()}**
+
+{user_activity}
+**{user_count} / {user_goal}**{note_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **PROGRESSION**
+```
+{progression_text.strip()}
+```"""
+
+            if photo_url:
+                cross_embed.set_image(url=photo_url)
+            cross_embed.set_footer(text="◆ Challenge Bot • Backfill")
+
+            cross_ping = " ".join([f"<@{pid}>" for pid in cross_ping_ids]) if cross_ping_ids else None
+            try:
+                await channel.send(content=cross_ping, embed=cross_embed)
+                cross_post_success += 1
+            except Exception:
+                cross_post_fail += 1
+
+    if other_challenges and (cross_post_success or cross_post_fail):
+        try:
+            msg = await interaction.original_response()
+            embed = msg.embeds[0]
+            desc = embed.description or ""
+            desc = desc.replace(
+                f"\n\n📤 Cross-post vers {len(other_challenges)} serveur(s)...",
+                f"\n\n📤 Cross-post: {cross_post_success} OK" + (f", {cross_post_fail} échec(s)" if cross_post_fail else ""),
+            )
+            embed.description = desc
+            await interaction.edit_original_response(embed=embed)
+        except Exception:
+            pass
 
 
 @bot.tree.command(name="checkinfor", description="Enregistrer une session pour quelqu'un d'autre")
@@ -3242,7 +3306,7 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 /setchannel  — Salon des check-ins
 /checkin     — Session + photo
 /latecheckin — Session d'HIER
-/backfill    — Session passée (≤30j, choix séance)
+/backfill    — Session passée (≤30j) + menu séance
 /checkinfor  — Session pour qqn d'autre
 /mycheckins  — Voir mes check-ins
 /deletecheckin— Supprimer un doublon
