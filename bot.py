@@ -62,6 +62,33 @@ def get_week_info():
     iso = now.isocalendar()
     return iso[1], iso[0]
 
+def parse_backfill_date(date_str: str) -> datetime.datetime:
+    """Parse JJ/MM/AAAA, JJ/MM/AA ou AAAA-MM-JJ → datetime 20h Paris."""
+    date_str = date_str.strip()
+    parsed = None
+    for fmt in ('%d/%m/%Y', '%d/%m/%y', '%Y-%m-%d'):
+        try:
+            parsed = datetime.datetime.strptime(date_str, fmt).date()
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        raise ValueError("Format invalide. Utilise JJ/MM/AAAA (ex: 31/05/2026).")
+    return datetime.datetime.combine(parsed, datetime.time(20, 0), tzinfo=PARIS_TZ)
+
+def resolve_plan_seance(user_id: int, seance: str):
+    """Valide une séance contre le plan utilisateur. Retourne (session_type, workout_name)."""
+    plan = get_workout_plan(user_id)
+    if not plan:
+        raise ValueError("Aucun plan d'entraînement. Configure-le avec `/setworkouts`.")
+    seance_norm = seance.strip()
+    for entry in plan:
+        if entry['workout_name'].lower() == seance_norm.lower():
+            session_type = 'cardio' if entry.get('is_cardio') else 'gym'
+            return session_type, entry['workout_name']
+    names = sorted({e['workout_name'] for e in plan})
+    raise ValueError(f"Séance inconnue. Options: {', '.join(names)}")
+
 def get_challenge_week_number(challenge_start_date: str) -> int:
     """Retourne le numéro de semaine du défi (1, 2, 3...) depuis le début"""
     start = datetime.datetime.fromisoformat(challenge_start_date)
@@ -2162,6 +2189,163 @@ async def latecheckin(interaction: discord.Interaction, photo: discord.Attachmen
             pass
 
 
+@bot.tree.command(name="backfill", description="Enregistrer une session passée (jusqu'à 30 jours)")
+@app_commands.describe(
+    date="Date de la session (JJ/MM/AAAA, ex: 31/05/2026)",
+    seance="Séance du plan (autocomplete)",
+    note="Note optionnelle (ex: Run 5km Strava)",
+    photo="Photo optionnelle"
+)
+async def backfill(
+    interaction: discord.Interaction,
+    date: str,
+    seance: str,
+    note: Optional[str] = None,
+    photo: Optional[discord.Attachment] = None,
+):
+    user_id = interaction.user.id
+    user_name = interaction.user.display_name
+
+    active_challenges = get_user_active_challenges(user_id)
+    if not active_challenges:
+        await interaction.response.send_message("Tu n'as pas de défi actif.", ephemeral=True)
+        return
+
+    if photo and (not photo.content_type or not photo.content_type.startswith('image/')):
+        await interaction.response.send_message("La photo doit être une image.", ephemeral=True)
+        return
+
+    try:
+        session_dt = parse_backfill_date(date)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        return
+
+    now = datetime.datetime.now(PARIS_TZ)
+    if session_dt.date() > now.date():
+        await interaction.response.send_message("La date ne peut pas être dans le futur.", ephemeral=True)
+        return
+
+    if (now.date() - session_dt.date()).days > 30:
+        await interaction.response.send_message("Maximum 30 jours en arrière.", ephemeral=True)
+        return
+
+    try:
+        session_type, workout_name = resolve_plan_seance(user_id, seance)
+    except ValueError as e:
+        await interaction.response.send_message(str(e), ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    profile = get_or_create_profile(user_id, user_name)
+    date_key = session_dt.date().isoformat()
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        SELECT id FROM checkins
+        WHERE user_id = %s AND substr(timestamp, 1, 10) = %s
+        LIMIT 1
+    ''', (user_id, date_key))
+    if c.fetchone():
+        conn.close()
+        await interaction.followup.send(
+            f"⚠ Tu as déjà un check-in le **{session_dt.strftime('%d/%m/%Y')}**. "
+            f"Utilise `/deletecheckin` si c'est un doublon.",
+            ephemeral=True,
+        )
+        return
+
+    iso = session_dt.isocalendar()
+    week_number, year = iso[1], iso[0]
+    timestamp = session_dt.isoformat()
+    backfill_note = f"[BACKFILL {session_dt.strftime('%d/%m')}]"
+    if note:
+        backfill_note += f" {note}"
+    photo_url = photo.url if photo else None
+
+    c.execute('''
+        INSERT INTO checkins (user_id, timestamp, week_number, year, photo_url, note, session_type, workout_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    ''', (user_id, timestamp, week_number, year, photo_url, backfill_note, session_type, workout_name))
+    checkin_id = c.fetchone()['id']
+    conn.commit()
+    conn.close()
+
+    user_count, user_goal = get_user_progress(user_id, profile)
+    user_activity = profile['activity']
+    days, hours = get_cycle_days_remaining(profile)
+
+    if user_count >= user_goal:
+        status = "✓ VALIDÉ"
+        status_emoji = "★"
+    else:
+        status = "En cours"
+        status_emoji = "▸"
+
+    note_text = f"\n📝 *{note}*" if note else ""
+    type_icon = "🏃" if session_type == 'cardio' else "🏋️"
+    session_date = session_dt.strftime('%d/%m/%Y')
+
+    workout_plan = get_workout_plan(user_id)
+    rotation_text = ""
+    if workout_plan:
+        done = get_cycle_workout_status(user_id, profile)
+        rotation_text = f"\n\n◆ **ROTATION**\n```\n{format_rotation_status(workout_plan, done, highlight=workout_name)}\n```"
+
+    if is_custom_cycle(profile):
+        cd = profile.get('cycle_days', 7)
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j {hours}h')}\n{format_stat_line('CYCLE', f'{cd}j')}"
+    else:
+        deadline_text = f"{format_stat_line('JOURS', f'{days}j {hours}h')}\n{format_stat_line('DEADLINE', 'Dimanche 23h')}"
+
+    embed = discord.Embed(color=EMBED_COLOR)
+    embed.description = f"""{status_emoji} **{status.upper()}** (backfill {session_date})
+
+**{user_name.upper()}**
+
+{type_icon} **{workout_name}**
+{user_activity}
+**{user_count} / {user_goal}**{note_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+◆ **TEMPS RESTANT**
+```
+{deadline_text}
+```{rotation_text}
+
+⏰ *Check-in #{checkin_id} enregistré rétroactivement*"""
+
+    if photo_url:
+        embed.set_image(url=photo_url)
+    embed.set_footer(text="◆ Challenge Bot • Backfill")
+
+    await interaction.followup.send(embed=embed)
+
+
+@backfill.autocomplete('seance')
+async def backfill_seance_autocomplete(interaction: discord.Interaction, current: str):
+    plan = get_workout_plan(interaction.user.id)
+    if not plan:
+        return []
+    current_lower = (current or '').lower()
+    choices = []
+    seen_cardio = False
+    for entry in plan:
+        name = entry['workout_name']
+        if entry.get('is_cardio'):
+            if seen_cardio:
+                continue
+            seen_cardio = True
+        if current_lower in name.lower():
+            icon = "🏃" if entry.get('is_cardio') else "🏋️"
+            choices.append(app_commands.Choice(name=f"{icon} {name}", value=name))
+    return choices[:25]
+
+
 @bot.tree.command(name="checkinfor", description="Enregistrer une session pour quelqu'un d'autre")
 @app_commands.describe(
     membre="La personne pour qui enregistrer",
@@ -3058,6 +3242,7 @@ Track ton sport. Défie tes potes. Pas d'excuses.
 /setchannel  — Salon des check-ins
 /checkin     — Session + photo
 /latecheckin — Session d'HIER
+/backfill    — Session passée (≤30j, choix séance)
 /checkinfor  — Session pour qqn d'autre
 /mycheckins  — Voir mes check-ins
 /deletecheckin— Supprimer un doublon
